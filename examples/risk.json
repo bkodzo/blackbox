@@ -1,0 +1,8 @@
+{
+  "list_dir":   { "risk": "low",    "category": "read",     "says": "listed the folder {path}" },
+  "read_file":  { "risk": "low",    "category": "read",     "says": "read the file {path}" },
+  "get_time":   { "risk": "low",    "category": "read",     "says": "checked the time" },
+  "write_file": { "risk": "medium", "category": "write",    "says": "wrote to {path}" },
+  "run_shell":  { "risk": "high",   "category": "execute",  "says": "ran a command: {cmd}" },
+  "send_email": { "risk": "high",   "category": "external", "says": "sent an email to {to}" }
+}
