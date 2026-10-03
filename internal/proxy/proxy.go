@@ -73,13 +73,22 @@ func New(cfg Config) *Proxy {
 	}
 	base := cfg.Transport
 	if base == nil {
-		base = http.DefaultTransport
+		// All traffic goes to one host. The default pool keeps only two idle
+		// connections per host, which under concurrent load means a new
+		// connection per request and, eventually, exhausted local ports.
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.MaxIdleConns = 256
+		t.MaxIdleConnsPerHost = 256
+		base = t
 	}
 	p := &Proxy{cfg: cfg}
 	p.rp = &httputil.ReverseProxy{
-		Rewrite:        p.rewrite,
-		Transport:      timedTransport{base},
-		FlushInterval:  -1, // pass streamed chunks through immediately
+		Rewrite:   p.rewrite,
+		Transport: timedTransport{base},
+		// Zero disables periodic flushing for ordinary responses. ReverseProxy
+		// still flushes event streams and unknown-length bodies after every
+		// write, so streamed tokens reach the agent immediately.
+		FlushInterval:  0,
 		ModifyResponse: p.modifyResponse,
 		ErrorHandler:   p.errorHandler,
 	}
