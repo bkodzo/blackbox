@@ -146,18 +146,18 @@ func printCall(seq uint64, c *record.LLMCall) {
 		if tc.InText {
 			label = "tool*   "
 		}
-		fmt.Printf("      %s %s %s  [risk: %s]\n", label, tc.Name, clip(tc.Arguments, 80), orDash(tc.Risk))
+		fmt.Printf("      %s %s %s  [risk: %s]\n", label, safe(tc.Name), clip(tc.Arguments, 80), orDash(tc.Risk))
 	}
 	for _, l := range c.ToolResultsIn {
 		if l.MatchedSeq > 0 {
-			fmt.Printf("      result   for %s, requested in #%d\n", l.ToolCallID, l.MatchedSeq)
+			fmt.Printf("      result   for %s, requested in #%d\n", safe(l.ToolCallID), l.MatchedSeq)
 		}
 	}
 	for _, a := range c.Anomalies {
-		fmt.Printf("      ANOMALY  %s: %s\n", a.Kind, a.Detail)
+		fmt.Printf("      ANOMALY  %s: %s\n", safe(a.Kind), safe(a.Detail))
 	}
 	if c.Error != nil {
-		fmt.Printf("      ERROR    %s: %s\n", c.Error.Class, c.Error.Message)
+		fmt.Printf("      ERROR    %s: %s\n", safe(c.Error.Class), safe(c.Error.Message))
 	}
 	if c.Response.FinishReason == "stop" || c.Response.FinishReason == "end_turn" {
 		fmt.Println("      answer   final response returned")
@@ -171,13 +171,33 @@ func orDash(s string) string {
 	if s == "" {
 		return "-"
 	}
-	return s
+	return safe(s)
 }
 
+// clip collapses whitespace, escapes, and shortens s to at most n runes.
 func clip(s string, n int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= n {
-		return s
+	r := []rune(safe(strings.Join(strings.Fields(s), " ")))
+	if len(r) <= n {
+		return string(r)
 	}
-	return s[:n-3] + "..."
+	return string(r[:n-3]) + "..."
+}
+
+// safe escapes control characters and Unicode direction controls in text
+// that came from agents or models, so it cannot move the cursor, erase
+// lines, or visually reorder what an auditor reads.
+func safe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || isDirectionControl(r) {
+			fmt.Fprintf(&b, `\u%04x`, r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func isDirectionControl(r rune) bool {
+	return r == 0x061c || r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
