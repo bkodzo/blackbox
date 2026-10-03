@@ -3,6 +3,7 @@
 package risk
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -36,7 +37,9 @@ func Load(path string) (Map, error) {
 		return nil, err
 	}
 	var m Map
-	if err := json.Unmarshal(b, &m); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields() // a misspelled field must not silently drop a rule
+	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	for name, r := range m {

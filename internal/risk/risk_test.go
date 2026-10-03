@@ -40,3 +40,9 @@ func TestEmptyPath(t *testing.T) {
 		t.Fatalf("map %v err %v", m, err)
 	}
 }
+
+func TestLoadRejectsUnknownField(t *testing.T) {
+	if _, err := Load(write(t, `{"run_shell":{"risk":"high","catgory":"execute"}}`)); err == nil {
+		t.Fatal("accepted a misspelled field")
+	}
+}
