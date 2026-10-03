@@ -1,4 +1,7 @@
 .git
+.github
 PLAN.md
-*.jsonl
 dist
+*.jsonl
+*.torn-*
+.blackbox
