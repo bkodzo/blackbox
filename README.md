@@ -44,11 +44,26 @@ Result: TAMPERED
 
 You can reproduce this with the [demo agent](examples/agent).
 
-## Quick start
+## Install
+
+Download a binary for macOS, Linux, or Windows from the
+[releases page](https://github.com/bkodzo/blackbox/releases), or:
 
 ```
 go install github.com/bkodzo/blackbox/cmd/blackbox@latest
+```
 
+A container image is published as `ghcr.io/bkodzo/blackbox`:
+
+```
+docker run --rm -v "$PWD:/data" -e HOME=/data ghcr.io/bkodzo/blackbox init
+docker run -d -p 8080:8080 -v "$PWD:/data" -e HOME=/data ghcr.io/bkodzo/blackbox \
+  serve --listen 0.0.0.0:8080 --upstream http://host.docker.internal:PORT
+```
+
+## Quick start
+
+```
 blackbox init                                         # create the signing key
 blackbox serve --upstream http://127.0.0.1:PORT     # your model server's address
 ```
