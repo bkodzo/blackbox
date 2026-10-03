@@ -35,6 +35,7 @@ the request is forwarded: `X-Blackbox-Session`, `X-Blackbox-Parent-Session`,
 | `model_substituted` | A different model answered than the one requested |
 | `stream_aborted` | The client disconnected before the response finished |
 | `high_risk_tool` | The model requested a tool marked high risk in the risk map |
+| `tool_call_in_text` | The model wrote a tool call into its reply text instead of making one |
 
 ## How the log detects tampering
 
