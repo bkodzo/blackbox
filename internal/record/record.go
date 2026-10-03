@@ -36,6 +36,11 @@ type GatewayStop struct {
 	Time       time.Time `json:"ts"`
 	InstanceID string    `json:"instance_id"`
 	Calls      uint64    `json:"calls"`
+	// Unrecorded counts calls this run forwarded but could not record.
+	Unrecorded uint64 `json:"unrecorded,omitempty"`
+	// AbortedAtShutdown counts calls still in flight when the shutdown grace
+	// period ended; they were cancelled and recorded as aborted.
+	AbortedAtShutdown uint64 `json:"aborted_at_shutdown,omitempty"`
 }
 
 // LLMCall is one exchange between an agent and the model server.
@@ -125,7 +130,10 @@ type Response struct {
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 	Usage        Usage      `json:"usage,omitzero"`
 	Stream       *Stream    `json:"stream,omitempty"`
-	Body         Body       `json:"body"`
+	// Upgraded is set when the server switched protocols (status 101).
+	// Traffic after the switch is passed through but not recorded.
+	Upgraded bool `json:"upgraded,omitempty"`
+	Body     Body `json:"body"`
 }
 
 type ToolCall struct {
@@ -156,8 +164,18 @@ type Stream struct {
 	Outcome string `json:"outcome"`
 }
 
+// Error classes.
+const (
+	ErrorUpstreamUnreachable = "upstream_unreachable"
+	ErrorUpstreamStatus      = "upstream_status"
+	ErrorUpstreamRead        = "upstream_read"
+	ErrorClientAborted       = "client_aborted"
+	ErrorGatewayShutdown     = "gateway_shutdown"
+	ErrorRequestTooLarge     = "request_too_large"
+)
+
 type Error struct {
-	Class   string `json:"class"` // "upstream_unreachable", "upstream_status", "upstream_read", "client_aborted"
+	Class   string `json:"class"` // see the Error* constants
 	Message string `json:"message"`
 }
 
@@ -191,3 +209,15 @@ const (
 	AnomalyHighRiskTool        = "high_risk_tool"
 	AnomalyToolCallInText      = "tool_call_in_text"
 )
+
+// Exchange is one finished request and response as captured by the proxy,
+// before the payloads are parsed. Call holds every field known without
+// parsing; Req and Resp hold the stored bodies.
+type Exchange struct {
+	Call      *LLMCall
+	Req, Resp []byte
+	SSE       bool
+}
+
+// Size is the memory held by the exchange's bodies.
+func (x Exchange) Size() int64 { return int64(len(x.Req) + len(x.Resp)) }
