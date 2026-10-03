@@ -57,7 +57,10 @@ func benchGateway(b *testing.B, upstream string) string {
 }
 
 func call(b *testing.B, client *http.Client, base string) {
-	resp, err := client.Post(base+"/v1/chat/completions", "application/json", strings.NewReader(benchReq))
+	req, _ := http.NewRequest("POST", base+"/v1/chat/completions", strings.NewReader(benchReq))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Blackbox-Session", "bench") // so session checks run on every call
+	resp, err := client.Do(req)
 	if err != nil {
 		b.Error(err)
 		return
@@ -105,7 +108,8 @@ func BenchmarkThroughput(b *testing.B) {
 }
 
 // BenchmarkRecordPipeline is the work done per call off the request path:
-// parsing, session checks, encoding, hashing, signing, and appending.
+// parsing, session checks against the previous turn, encoding, hashing,
+// signing, and appending. Disk writes happen in the background.
 func BenchmarkRecordPipeline(b *testing.B) {
 	l := benchLedger(b)
 	defer l.Close()
@@ -113,23 +117,20 @@ func BenchmarkRecordPipeline(b *testing.B) {
 	defer rec.Close()
 	b.SetBytes(int64(len(benchReq) + len(benchResp)))
 	for b.Loop() {
-		c := record.Exchange{
+		x := record.Exchange{
 			Call: &record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "s"}},
 			Req:  []byte(benchReq), Resp: []byte(benchResp),
 		}
-		call, parsed := Enrich(c, "bench", nil)
-		rec.sessions.Observe(call, parsed)
-		if err := appendCall(l, call); err != nil {
+		call, parsed := Enrich(x, "bench", nil)
+		obs := rec.sessions.Observe(call, parsed)
+		line, err := json.Marshal(call)
+		if err != nil {
 			b.Fatal(err)
 		}
+		e, _, err := l.Append(line)
+		if err != nil {
+			b.Fatal(err)
+		}
+		rec.sessions.Commit(obs, e.Seq)
 	}
-}
-
-func appendCall(l *ledger.Ledger, c *record.LLMCall) error {
-	b, err := json.Marshal(c)
-	if err != nil {
-		return err
-	}
-	_, _, err = l.Append(b)
-	return err
 }
