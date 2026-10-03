@@ -12,7 +12,6 @@
 package ledger
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -131,18 +130,19 @@ type Checkpoint struct {
 
 // Ledger appends entries to a log file. It is safe for concurrent use.
 //
-// Appends only touch an in-memory buffer under mu. A background flusher
-// writes the buffer out and fsyncs outside mu, so appenders never wait on
-// the disk unless Options.Sync is set.
+// Appends only touch an in-memory buffer under mu. A background flusher swaps
+// that buffer out under mu, then writes and fsyncs without holding it, so
+// appenders never wait on the disk unless Options.Sync is set. (On some
+// systems a write blocks while an fsync of the same file is in progress, so
+// even the write must happen outside mu.)
 type Ledger struct {
 	opt Options
 	key ed25519.PrivateKey
 	f   *os.File
 
 	mu      sync.Mutex // guards the fields below
-	w       *bufio.Writer
-	buf     []byte
-	size    int64 // bytes in the file, including buffered ones
+	pend    []byte     // encoded entries not yet written to the file
+	size    int64      // bytes in the file, including pending ones
 	seq     uint64
 	head    []byte
 	last    *Entry
@@ -151,6 +151,7 @@ type Ledger struct {
 	closing bool
 
 	syncMu  sync.Mutex // serializes flushes; guards the fields below
+	spare   []byte     // reused as the next pend buffer
 	durable *Entry     // newest entry known to be on disk
 	cp      *os.File
 	cpSeq   uint64
@@ -216,7 +217,6 @@ func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 		}
 	}
 
-	l.w = bufio.NewWriterSize(f, 256<<10)
 	l.kick = make(chan struct{}, 1)
 	l.stop, l.done = make(chan struct{}), make(chan struct{})
 	go l.loop()
@@ -300,14 +300,10 @@ func (l *Ledger) Append(rec []byte) (Entry, int64, error) {
 		Sig:  base64.StdEncoding.EncodeToString(ed25519.Sign(l.key, sum[:])),
 		Rec:  rec,
 	}
-	l.buf = e.appendLine(l.buf[:0])
-	if _, err := l.w.Write(l.buf); err != nil {
-		l.err = fmt.Errorf("ledger: write failed: %w", err)
-		l.mu.Unlock()
-		return Entry{}, 0, l.err
-	}
+	n := len(l.pend)
+	l.pend = e.appendLine(l.pend)
 	off := l.size
-	l.size += int64(len(l.buf))
+	l.size += int64(len(l.pend) - n)
 	l.seq, l.head, l.last = seq, sum[:], &e
 	l.pending++
 	full := l.pending >= l.opt.FlushRecords
@@ -336,27 +332,37 @@ func (l *Ledger) flush(forceCheckpoint bool) error {
 		defer l.mu.Unlock()
 		return l.err
 	}
-	n, last := l.pending, l.last
-	if n > 0 {
-		if err := l.w.Flush(); err != nil {
-			l.err = fmt.Errorf("ledger: write failed: %w", err)
-			l.mu.Unlock()
-			return l.err
-		}
-		l.pending = 0
-	}
+	data, last := l.pend, l.last
+	l.pend, l.pending = l.spare[:0], 0
 	l.mu.Unlock()
 
-	if n > 0 {
+	if len(data) > 0 {
+		if _, err := l.f.Write(data); err != nil {
+			return l.fail("write", err)
+		}
 		if err := l.f.Sync(); err != nil {
-			l.mu.Lock()
-			l.err = fmt.Errorf("ledger: fsync failed: %w", err)
-			l.mu.Unlock()
-			return l.err
+			return l.fail("fsync", err)
 		}
 		l.durable = last
 	}
+	if cap(data) <= maxSpare {
+		l.spare = data[:0]
+	} else {
+		l.spare = nil // do not hold on to a buffer grown by a burst
+	}
 	return l.checkpoint(forceCheckpoint)
+}
+
+// maxSpare caps the buffer kept for reuse between flushes.
+const maxSpare = 4 << 20
+
+// fail records a sticky I/O error. Entries that were swapped out but not
+// written are lost from this process, so the ledger refuses further appends.
+func (l *Ledger) fail(op string, err error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.err = fmt.Errorf("ledger: %s failed: %w", op, err)
+	return l.err
 }
 
 // checkpoint records the durable head. Caller holds syncMu.
