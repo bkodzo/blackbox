@@ -8,8 +8,9 @@ This document explains how blackbox works and why it is built the way it is.
    the agent beyond its base URL.
 2. Make the record tamper-evident: editing, deleting, reordering, or truncating
    entries, or rebuilding the log, must be detectable.
-3. Flag agent behaviour an auditor should look at.
-4. Stay small: one binary, no database, no third-party Go modules, and no
+3. Never forward traffic that is not being recorded.
+4. Flag agent behaviour an auditor should look at.
+5. Stay small: one binary, no database, no third-party Go modules, and no
    assumptions about which model or provider is behind the gateway.
 
 ## Request path
@@ -17,21 +18,21 @@ This document explains how blackbox works and why it is built the way it is.
 ```
 agent --> proxy --> model server
             |
-            | capture (bytes, hashes, timing)
+            | exchange (bytes, hashes, timing)
             v
-         recorder --> format parser --> session checks --> ledger
+         recorder --> format parser --> conversation checks --> ledger
 ```
 
 The proxy is a standard reverse proxy. It forwards every path to the configured
 upstream and does not interpret payloads. While the response streams back to
 the agent, the proxy copies the bytes into a buffer and a running SHA-256. When
-the exchange ends it hands a capture to the recorder and returns.
+the exchange ends it hands it to the recorder and returns.
 
-The recorder runs on its own goroutine. It parses the payloads, runs the session
-checks, encodes the record, and appends it to the ledger. None of that happens
-on the request path, so the agent never waits for parsing, signing, or disk
-I/O. The queue between the proxy and the recorder is bounded. If it fills, the
-proxy blocks: the gateway slows down rather than dropping audit records.
+The recorder runs on its own goroutine. It parses the payloads, runs the
+conversation checks, encodes the record, and appends it to the ledger. None of
+that happens on the request path. The queue between the proxy and the recorder
+is bounded by bytes (256 MiB by default). When it is full the proxy blocks: the
+gateway slows down rather than dropping records or growing without limit.
 
 ## The log
 
@@ -40,74 +41,128 @@ proxy blocks: the gateway slows down rather than dropping audit records.
 Each line of the log is one entry:
 
 ```
-{"seq":42,"prev":"<hex>","hash":"<hex>","sig":"<base64>","rec":{...}}
+{"v":2,"seq":42,"kid":"<key id>","prev":"<hex>","hash":"<hex>","sig":"<base64>","rec":{...}}
 ```
 
-- `hash = SHA-256(seq as 8 big-endian bytes, prev hash, rec bytes)`
-- `sig = Ed25519(private key, hash)`
+- `hash = SHA-256("blackbox/entry/v2", seq, kid, prev, rec bytes)`, with each
+  variable-length field length-prefixed.
+- `sig = Ed25519(private key, "blackbox/entry-sig/v2" + hash)`.
 
-The envelope is written by hand around the record bytes. The record is
-serialized once, and verification hashes the bytes exactly as they appear on
-disk. Nothing is re-encoded, so there is no canonical JSON to get wrong: any
-change to the bytes, even whitespace, changes the hash.
+The tags make every hash and signature specific to its purpose, so a signature
+made for one kind of message (an entry, a checkpoint) can never be accepted as
+another. The key ID records which key signed the entry, which leaves room for
+key rotation.
+
+### One encoding per entry
+
+The envelope is written by hand around the record bytes. On read, an entry is
+accepted only if re-encoding its parsed fields reproduces the line byte for
+byte. This rejects duplicate keys, differently cased keys, escaped keys, extra
+fields, added whitespace, uppercase hex, and padded base64. Without this rule,
+a line could pass verification while other JSON parsers, such as `jq` or a
+dashboard, read different content from it.
 
 ### Why a hash chain is not enough
 
 A hash chain detects edits, deletions, and reordering, because each entry
 commits to the one before it. It does not stop someone who can write the file
-from editing an entry and recomputing every hash after it. The result is a
-perfectly consistent chain.
+from editing an entry and recomputing every hash after it. Signatures close
+that gap: rebuilding the chain requires the private key.
 
-Signatures close that gap. Each entry's hash is signed with the gateway's
-Ed25519 key. Rebuilding the chain requires the private key; without it, every
-rebuilt entry fails signature verification.
-
-### Why checkpoints are needed too
+### Checkpoints
 
 Neither chaining nor signatures detect entries removed from the end of the log,
 because what remains is still a valid, signed prefix. Checkpoints cover that.
 
-After each durable flush, and at most every 1,000 entries or 5 minutes, the
-ledger writes a checkpoint: the sequence number, hash, and signature of the
-newest durable entry. Checkpoints go to a separate file and, by default, to
-stdout so they can be shipped to another machine. If the log is shorter than
-any checkpoint, verification reports how many entries were removed.
+After a durable flush, at most every 1,000 entries or 5 minutes, the ledger
+writes a checkpoint to a separate file and, by default, to stdout so a copy
+leaves the machine:
 
-A checkpoint reuses the entry's own signature, so it cannot be forged without
-the key either.
+```
+{"v":2,"log":"<hash of entry 1>","seq":42,"hash":"<hex>","ts":"<time>","kid":"<key id>","sig":"<base64>"}
+```
+
+The signature covers every field, so neither the sequence number nor the time
+can be altered. Verification treats these as tampering:
+
+- the log is shorter than a checkpoint (entries were removed);
+- an entry differs from the checkpoint for its sequence number;
+- two checkpoints disagree about the same sequence number (the log was
+  truncated and rewritten after a checkpoint was shipped);
+- a checkpoint names a different log.
+
+The gateway also refuses to start on a log that is shorter than, or disagrees
+with, its own latest checkpoint, so it never extends a chain over a gap.
 
 ### Durability and group commit
 
 Calling fsync after every entry is slow, especially on macOS, where Go uses
-`F_FULLFSYNC` (about 5 ms per call). The ledger uses group commit instead:
+`F_FULLFSYNC` (about 5 ms per call). The ledger uses group commit:
 
 - Appends encode the entry into an in-memory buffer under a lock.
 - A background flusher swaps the buffer out, then writes and fsyncs it without
   holding the lock. It runs every 50 ms, or sooner once 64 entries are pending.
+- The buffer is bounded (64 MiB by default). When it is full, appends wait
+  for the flusher, so a slow disk slows the gateway instead of growing memory.
 
 The write happens outside the lock as well as the fsync, because on some
 systems a write blocks while an fsync of the same file is in progress.
 
-The tradeoff: a hard crash can lose up to about 50 ms of entries. That loss is
-visible rather than silent. The next `gateway_start` entry records whether the
-previous run shut down cleanly, and `verify` warns when a start is not preceded
-by a stop. `--sync always` fsyncs every entry for deployments that need it.
+The agent receives its response before the record is written. A hard crash can
+therefore lose the calls still queued in the recorder and the entries in the
+current 50 ms batch. `--sync always` fsyncs every entry, which removes the
+batch window but not the queue. The loss is visible: the next `gateway_start`
+records that the previous run did not stop cleanly, and `verify` warns about it.
 
-### Torn writes
+### Crash recovery
 
-If the process dies in the middle of writing a line, the file ends with an
-incomplete entry. On startup the ledger removes those bytes and reports how many
-it removed; the count is recorded in the `gateway_start` entry. `verify` on a
-log that has not been reopened reports the torn tail as a warning, not as
-tampering.
+If the log ends without a newline at startup, the gateway never discards the
+trailing bytes:
+
+- If they are the complete, validly signed next entry, the newline is added
+  and the entry kept.
+- Otherwise they are an interrupted write. They are moved to a
+  `.torn-<time>` file next to the log, and their size, file name, and SHA-256
+  are recorded in the `gateway_start` entry, so the removal is itself signed
+  and visible to `verify`.
 
 ### Verification
 
-`blackbox verify` makes one streaming pass with bounded memory. It reads entries
-in batches of 1,024, checks sequence numbers and back-links in order (cheap),
-then recomputes hashes and checks signatures in parallel across all cores
-(expensive), and reports the first problem in log order. On an Apple M3 it
-verifies about 240 MB/s.
+`blackbox verify` makes one streaming pass with bounded memory. It reads
+entries in batches of 1,024, checks encoding, sequence numbers, and back-links
+in order, then recomputes hashes and checks signatures in parallel across all
+cores, and reports the first problem in log order. Exit codes are distinct:
+0 intact, 1 tampered, 2 intact with warnings, 3 usage or I/O error.
+
+## Failure handling
+
+### Fail closed
+
+If a record cannot be written (disk full, I/O error), the ledger stops
+accepting appends, the proxy refuses new requests with 503, the health
+endpoint reports the failure, and the gateway shuts down with a non-zero exit
+code so a supervisor notices. Agents are never served unrecorded. `--fail-open`
+keeps forwarding instead, for deployments that prefer availability; the gap is
+then visible as missing records and an unclean stop.
+
+### Shutdown
+
+On SIGINT or SIGTERM the gateway stops accepting connections and gives calls
+in flight a grace period (30 s by default). Calls still running when it ends,
+such as long streams, are cancelled and recorded with the error class
+`gateway_shutdown`. Only after every call has been handed to the recorder and
+written does the gateway write `gateway_stop`, which counts calls recorded,
+calls that could not be recorded, and calls cancelled.
+
+### Limits
+
+| Limit | Default | Why |
+|---|---|---|
+| Request size | 64 MiB | Larger requests get 413 and are recorded as refused |
+| Stored body size | 32 MiB | Bodies beyond this are truncated in the log; hashes cover every byte |
+| Request body read | 1 minute | A slow client cannot hold a request open indefinitely |
+| Upstream response headers | 10 minutes | A model server that never answers frees its slot |
+| Idle connections | 2 minutes | |
 
 ## Format parsing
 
@@ -117,55 +172,69 @@ recognizes payloads by shape:
 - **chat**: responses with a `choices` array, streamed as choice deltas.
 - **blocks**: responses with typed content blocks, streamed as block events.
 
-Requests are read by one tolerant parser that understands both. Anything that
-matches neither shape is recorded as `unknown`, with its full bytes and hashes;
-only the convenience fields stay empty. Adding a shape means adding a parser,
-not changing the proxy or the log.
+Anything that matches neither shape is recorded as `unknown`, with its full
+bytes and hashes; only the convenience fields stay empty.
 
 The parser also scans reply text for tool calls written as text, a common
-failure of small models. This is a heuristic (a JSON object with a tool-like
-name and arguments) with bounded work: at most 64 KB of text and 64 candidate
-objects per reply.
+failure of small models: a JSON object with a tool-like name and arguments
+that is not a JSON Schema (which would mean the model is describing a tool, not
+calling it). The work is bounded to 64 KB of text and 64 candidates per reply.
 
-## Session checks
+## Conversation checks
 
-The session tracker follows each session across calls using only hashes and
-tool call IDs, never message content. Message hashes are computed over
-canonical JSON (sorted keys, no insignificant whitespace), so a client that
-serializes the same message differently does not trigger a false alarm.
+The tracker follows conversations using only hashes and tool call identities,
+never message content. Message hashes are computed over canonical JSON (sorted
+keys, no insignificant whitespace, no transport annotations such as cache
+markers), so reformatting does not trigger false alarms.
 
-For each call it checks that:
+Calls are grouped by the `X-Blackbox-Session` header when it is sent. Calls
+without it are grouped by conversation: a hash of the opening messages, plus
+the rule that a request continues a conversation if the previous request's
+messages are a prefix of it. Retries and parallel runs of the same task become
+separate branches. State for the last hour is rebuilt from the log at startup,
+so a restart does not reset the checks.
 
-- every message sent last turn is sent again unchanged (`history_rewritten`,
-  `history_truncated`);
-- the reply echoed back by the agent contains the tool calls the model actually
-  returned (`history_rewritten`);
-- every new tool result answers a tool call the model issued in this session
+For each call the tracker checks that:
+
+- the history sent last turn is sent again unchanged, or with older turns
+  dropped (`history_truncated`), and not otherwise changed
+  (`history_rewritten`);
+- the reply the agent echoes back contains exactly the tool calls the model
+  returned, with the same names and arguments, and the same text
+  (`history_rewritten`);
+- every new tool result answers a call the model made in this conversation
   (`orphan_tool_result`), and links it to the entry where the call was made;
-- the tools and system prompt have not changed (`toolset_changed`,
-  `system_prompt_changed`).
+  results with no earlier turn to check against are flagged as
+  `unverifiable_tool_result` rather than trusted;
+- the tools and leading system prompt have not changed.
 
-Single-call checks cover model substitution, aborted streams, high-risk tools,
-and tool calls written as text. Sessions idle for an hour are forgotten.
+Servers that return tool calls without IDs are handled by matching the agent's
+echoed calls by name and arguments and adopting the IDs the agent assigned.
+
+Single-call checks cover model substitution (a served name must equal the
+requested one or add only a version suffix), aborted streams, high-risk tools,
+and tool calls written as text.
 
 ## Storage of bodies
 
 Request and response bodies are stored verbatim as text, or as base64 if they
 are not valid UTF-8, so their SHA-256 can be recomputed from the log alone.
-Bodies over 32 MiB are truncated in the log, but their hash and byte count
-always cover every byte.
+Every turn stores the whole conversation, so storage grows with the square of
+a conversation's length; storing messages once by hash is planned.
 
 ## Performance
 
-Measured on an Apple M3 with the benchmarks in `internal/recorder`:
+Measured on an Apple M3 with the benchmarks in `internal/recorder` and
+`internal/ledger`, with conversation checks running on every call:
 
 | Measure | Result |
 |---|---|
-| Added latency per call | about 0.14 ms |
-| Throughput through the gateway | about 10,600 calls/s |
-| Recording pipeline per call (off the request path) | about 85 us |
-| Ledger append, group commit | about 16 us |
-| Verification | about 240 MB/s |
+| Added latency per call | about 0.17 ms |
+| Throughput through the gateway | about 6,500 calls/s |
+| Recording pipeline per call (off the request path) | about 100 us |
+| Ledger append, including every fsync | about 18 us (55,000 entries/s) |
+| `--sync always` append | about 5 ms |
+| Verification | about 230 MB/s |
 
 Model calls take hundreds of milliseconds or more, so the gateway adds well
 under one percent to an agent's run time.
@@ -173,6 +242,8 @@ under one percent to an agent's run time.
 ## Not yet built
 
 - A web dashboard for auditors and managers.
-- Auditing of tool execution itself, by proxying tool servers.
+- Auditing tool execution itself, by proxying tool servers.
+- Key rotation: a signed hand-over entry and verification against a key set.
+- Segmented log files with an index, for large logs and the dashboard.
+- Storing each message once, referenced by hash.
 - Roles, access logging, and exportable evidence bundles.
-- Anchoring checkpoints in an external transparency log.
