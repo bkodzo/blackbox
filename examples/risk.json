@@ -5,6 +5,7 @@
   "write_file": { "risk": "medium", "category": "write",    "says": "wrote to {path}" },
   "run_shell":  { "risk": "high",   "category": "execute",  "says": "ran a command: {cmd}" },
   "rm":         { "risk": "high",   "category": "delete",   "says": "deleted {path}" },
+  "rmdir":      { "risk": "high",   "category": "delete",   "says": "deleted the folder {path}" },
   "delete_file":{ "risk": "high",   "category": "delete",   "says": "deleted {path}" },
   "send_email": { "risk": "high",   "category": "external", "says": "sent an email to {to}" }
 }
