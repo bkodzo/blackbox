@@ -1,0 +1,102 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/bkodzo/blackbox/internal/ledger"
+	"github.com/bkodzo/blackbox/internal/record"
+)
+
+// Exit codes for verify.
+const (
+	exitIntact   = 0
+	exitTampered = 1
+	exitWarnings = 2
+)
+
+func runVerify(args []string) int {
+	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	logPath := fs.String("log", "blackbox.jsonl", "audit log file")
+	cpPath := fs.String("checkpoints", "blackbox.checkpoints.jsonl", "checkpoint file")
+	pubPath := fs.String("pub", filepath.Join(keyDir(), "key.pub"), "gateway public key")
+	fs.Parse(args)
+
+	pub, err := ledger.LoadPublicKey(*pubPath)
+	if err != nil {
+		return fail("%v", err)
+	}
+	cps, err := ledger.ReadCheckpoints(*cpPath)
+	if err != nil {
+		return fail("%v", err)
+	}
+	f, err := os.Open(*logPath)
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer f.Close()
+
+	var (
+		warnings []string
+		calls    int
+		running  bool // a gateway_start has no matching gateway_stop yet
+	)
+	res, err := ledger.Verify(f, pub, cps, func(e ledger.Entry) {
+		var h struct {
+			Type string `json:"type"`
+		}
+		json.Unmarshal(e.Rec, &h)
+		switch h.Type {
+		case record.TypeGatewayStart:
+			if running {
+				warnings = append(warnings, fmt.Sprintf(
+					"seq %d: gateway started again without a clean shutdown before it; calls in flight at the time may be missing", e.Seq))
+			}
+			running = true
+		case record.TypeGatewayStop:
+			running = false
+		case record.TypeLLMCall:
+			calls++
+		}
+	})
+
+	fmt.Printf("Log:          %s\n", *logPath)
+	fmt.Printf("Signing key:  %s\n", ledger.Fingerprint(pub))
+	fmt.Printf("Entries:      %d checked (%d model calls)\n", res.Entries, calls)
+	fmt.Printf("Checkpoints:  %d of %d matched\n", res.Checkpoints, len(cps))
+
+	var ve *ledger.VerifyError
+	if errors.As(err, &ve) {
+		fmt.Printf("\nResult: TAMPERED\n  %s\n", ve.Error())
+		if ve.Seq > 1 {
+			fmt.Printf("  Entries 1 to %d are intact.\n", ve.Seq-1)
+		}
+		return exitTampered
+	}
+	if err != nil {
+		return fail("%v", err)
+	}
+
+	if res.TornTail {
+		warnings = append(warnings, "the log ends in an incomplete line (a crash during a write); the gateway removes it on next start")
+	}
+	if len(cps) == 0 {
+		warnings = append(warnings, "no checkpoints found, so entries removed from the end of the log cannot be detected")
+	}
+	fmt.Printf("\nResult: INTACT\n  Every entry is unchanged, in order, and signed by this key.\n  Head: %s\n", res.Head)
+	if running {
+		fmt.Println("  The last gateway run has not shut down (it may still be running).")
+	}
+	if len(warnings) == 0 {
+		return exitIntact
+	}
+	fmt.Println("\nWarnings:")
+	for _, w := range warnings {
+		fmt.Printf("  - %s\n", w)
+	}
+	return exitWarnings
+}
