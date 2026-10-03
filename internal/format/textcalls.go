@@ -65,6 +65,9 @@ func asToolCall(obj map[string]json.RawMessage) (ToolCall, bool) {
 			return ToolCall{Name: name, Arguments: s}, true
 		}
 		if len(raw) > 0 && raw[0] == '{' {
+			if isSchema(raw) {
+				return ToolCall{}, false // a tool definition being described, not a call
+			}
 			return ToolCall{Name: name, Arguments: string(compact(raw))}, true
 		}
 	}
@@ -89,4 +92,17 @@ func textOf(raw json.RawMessage) string {
 		b.WriteString(p.Text)
 	}
 	return b.String()
+}
+
+// isSchema reports whether an arguments object is a JSON Schema, which means
+// the model is describing a tool rather than calling it.
+func isSchema(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	_, props := obj["properties"]
+	var typ string
+	json.Unmarshal(obj["type"], &typ)
+	return props && typ == "object"
 }

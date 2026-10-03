@@ -79,6 +79,9 @@ type Agent struct {
 type Session struct {
 	ID       string `json:"id,omitempty"`
 	ParentID string `json:"parent_id,omitempty"`
+	// Conversation identifies calls without a session ID that continue the
+	// same conversation: a hash of its opening messages.
+	Conversation string `json:"conversation,omitempty"`
 }
 
 type Client struct {
@@ -208,6 +211,7 @@ const (
 	AnomalyStreamAborted       = "stream_aborted"
 	AnomalyHighRiskTool        = "high_risk_tool"
 	AnomalyToolCallInText      = "tool_call_in_text"
+	AnomalyUnverifiableResult  = "unverifiable_tool_result"
 )
 
 // Exchange is one finished request and response as captured by the proxy,

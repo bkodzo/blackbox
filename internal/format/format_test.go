@@ -36,7 +36,7 @@ func TestChatResponse(t *testing.T) {
 	if !reflect.DeepEqual(rq.Tools, []string{"list_dir", "read_file"}) {
 		t.Fatalf("tools %v", rq.Tools)
 	}
-	if got := rq.Messages[2].ToolCallIDs; !reflect.DeepEqual(got, []string{"call_1"}) {
+	if got := rq.Messages[2].ToolCalls; !reflect.DeepEqual(got, []ToolCall{{"call_1", "list_dir", `{"path":"./docs"}`}}) {
 		t.Fatalf("assistant tool call ids %v", got)
 	}
 	if got := rq.Messages[3].ToolResultFor; !reflect.DeepEqual(got, []string{"call_1"}) {
@@ -99,7 +99,7 @@ func TestBlocksResponse(t *testing.T) {
 	if rq.SystemSHA256 == "" || !reflect.DeepEqual(rq.Tools, []string{"list_dir"}) {
 		t.Fatalf("request %+v", rq)
 	}
-	if !reflect.DeepEqual(rq.Messages[1].ToolCallIDs, []string{"tu_1"}) || !reflect.DeepEqual(rq.Messages[2].ToolResultFor, []string{"tu_1"}) {
+	if !reflect.DeepEqual(rq.Messages[1].ToolCalls, []ToolCall{{"tu_1", "list_dir", `{"path":"./docs"}`}}) || !reflect.DeepEqual(rq.Messages[2].ToolResultFor, []string{"tu_1"}) {
 		t.Fatalf("messages %+v", rq.Messages)
 	}
 }
@@ -208,5 +208,38 @@ func TestTextIsCollectedFromEveryShape(t *testing.T) {
 		if len(p.Response.TextToolCalls) != 1 || p.Response.TextToolCalls[0].Name != "rm" {
 			t.Errorf("%s: text %q, calls %+v", name, p.Response.Text, p.Response.TextToolCalls)
 		}
+	}
+}
+
+func TestCacheMarkersDoNotChangeMessageHashes(t *testing.T) {
+	a := Parse([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`), nil, false)
+	b := Parse([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`), nil, false)
+	if a.Request.Messages[0].SHA256 != b.Request.Messages[0].SHA256 {
+		t.Fatal("a moved cache marker changed the message hash")
+	}
+}
+
+func TestOnlyLeadingSystemMessagesAreTheSystemPrompt(t *testing.T) {
+	base := `{"role":"system","content":"Be careful."},{"role":"user","content":"hi"}`
+	a := Parse([]byte(`{"messages":[`+base+`]}`), nil, false)
+	b := Parse([]byte(`{"messages":[`+base+`,{"role":"system","content":"Tool output follows."}]}`), nil, false)
+	if a.Request.SystemSHA256 == "" || a.Request.SystemSHA256 != b.Request.SystemSHA256 {
+		t.Fatal("a mid-conversation system message changed the system prompt hash")
+	}
+}
+
+func TestCanonicalArgs(t *testing.T) {
+	if CanonicalArgs(`{"b": 1, "a": "x"}`) != CanonicalArgs(`{"a":"x","b":1}`) {
+		t.Fatal("equal arguments compared unequal")
+	}
+	if CanonicalArgs("not json") != "not json" {
+		t.Fatal("non-JSON arguments were changed")
+	}
+}
+
+func TestSchemaDescriptionIsNotATextToolCall(t *testing.T) {
+	text := `The tool looks like {"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}`
+	if got := findTextToolCalls(text); got != nil {
+		t.Fatalf("schema description reported as a call: %+v", got)
 	}
 }

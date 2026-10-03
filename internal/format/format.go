@@ -30,9 +30,10 @@ const (
 // Message is the part of a request message that session checks need.
 type Message struct {
 	Role          string
-	SHA256        string   // hash of the message's canonical JSON
-	ToolCallIDs   []string // tool calls this (assistant) message contains
-	ToolResultFor []string // tool call IDs this message returns results for
+	SHA256        string     // hash of the message's canonical JSON
+	TextSHA256    string     // hash of the message's text, "" if it has none
+	ToolCalls     []ToolCall // calls in an assistant message; Arguments are canonical
+	ToolResultFor []string   // tool call IDs this message returns results for
 }
 
 // Request is what the agent asked for.
@@ -110,15 +111,15 @@ type rawMessage struct {
 	Role       string          `json:"role"`
 	Content    json.RawMessage `json:"content"`
 	ToolCallID string          `json:"tool_call_id"`
-	ToolCalls  []struct {
-		ID string `json:"id"`
-	} `json:"tool_calls"`
+	ToolCalls  []chatToolCall  `json:"tool_calls"`
 }
 
 type rawBlock struct {
-	Type      string `json:"type"`
-	ID        string `json:"id"`
-	ToolUseID string `json:"tool_use_id"`
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
 }
 
 func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
@@ -137,14 +138,18 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 		sysSeen = true
 	}
 
+	leading := true // system messages count as the system prompt only before the conversation starts
 	r.Messages = make([]Message, 0, len(raw.Messages))
 	for _, m := range raw.Messages {
 		var rm rawMessage
 		json.Unmarshal(m, &rm)
 		c := canonical(m)
 		msg := Message{Role: rm.Role, SHA256: hexSum(c)}
+		if text := strings.TrimSpace(textOf(rm.Content)); text != "" {
+			msg.TextSHA256 = hexSum([]byte(text))
+		}
 		for _, tc := range rm.ToolCalls {
-			msg.ToolCallIDs = append(msg.ToolCallIDs, tc.ID)
+			msg.ToolCalls = append(msg.ToolCalls, ToolCall{tc.ID, tc.Function.Name, CanonicalArgs(tc.Function.Arguments)})
 		}
 		if rm.ToolCallID != "" {
 			msg.ToolResultFor = append(msg.ToolResultFor, rm.ToolCallID)
@@ -154,7 +159,7 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 			for _, b := range blocks {
 				switch b.Type {
 				case "tool_use":
-					msg.ToolCallIDs = append(msg.ToolCallIDs, b.ID)
+					msg.ToolCalls = append(msg.ToolCalls, ToolCall{b.ID, b.Name, string(canonical(compact(b.Input)))})
 					blockHints = true
 				case "tool_result":
 					msg.ToolResultFor = append(msg.ToolResultFor, b.ToolUseID)
@@ -162,9 +167,11 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 				}
 			}
 		}
-		if rm.Role == "system" || rm.Role == "developer" {
+		if leading && (rm.Role == "system" || rm.Role == "developer") {
 			sys.Write(c)
 			sysSeen = true
+		} else {
+			leading = false
 		}
 		r.Messages = append(r.Messages, msg)
 	}
@@ -192,6 +199,23 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 		r.ToolsSHA256 = hex.EncodeToString(all.Sum(nil))
 	}
 	return r, hasMessages, blockHints
+}
+
+// CanonicalArgs normalizes tool call arguments so that the same arguments
+// serialized differently compare equal. Non-JSON arguments are returned as is.
+func CanonicalArgs(args string) string {
+	if !json.Valid([]byte(args)) {
+		return args
+	}
+	return string(canonical([]byte(args)))
+}
+
+// TextHash is the hash used for comparing reply text, "" for empty text.
+func TextHash(text string) string {
+	if text = strings.TrimSpace(text); text == "" {
+		return ""
+	}
+	return hexSum([]byte(text))
 }
 
 // usage accepts every common spelling of token counts.
@@ -405,8 +429,14 @@ func parseStream(b []byte, r *Response) string {
 	return format
 }
 
-// canonical re-encodes JSON with sorted keys and no insignificant space, so
-// equal values hash equally regardless of how a client serialized them.
+// annotationKeys are fields clients attach to messages for transport
+// purposes, such as cache markers that move from turn to turn. They do not
+// change what was said, so they are left out of message hashes.
+var annotationKeys = []string{"cache_control"}
+
+// canonical re-encodes JSON with sorted keys, no insignificant space, and no
+// annotation fields, so equal content hashes equally regardless of how a
+// client serialized it.
 func canonical(b []byte) []byte {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -414,6 +444,7 @@ func canonical(b []byte) []byte {
 	if dec.Decode(&v) != nil {
 		return b
 	}
+	stripAnnotations(v)
 	out, err := json.Marshal(v)
 	if err != nil {
 		return b
@@ -435,4 +466,20 @@ func compact(b []byte) []byte {
 func hexSum(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
+}
+
+func stripAnnotations(v any) {
+	switch v := v.(type) {
+	case map[string]any:
+		for _, k := range annotationKeys {
+			delete(v, k)
+		}
+		for _, x := range v {
+			stripAnnotations(x)
+		}
+	case []any:
+		for _, x := range v {
+			stripAnnotations(x)
+		}
+	}
 }
