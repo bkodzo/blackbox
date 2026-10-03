@@ -26,6 +26,17 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# One SBOM per archive, generated with syft.
+sboms:
+  - artifacts: archive
+
+# Keyless signature over the checksums, which cover every archive.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "${artifact}", "--yes"]
+
 changelog:
   use: github
   filters:
