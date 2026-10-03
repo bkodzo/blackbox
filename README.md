@@ -53,13 +53,26 @@ Download a binary for macOS, Linux, or Windows from the
 go install github.com/bkodzo/blackbox/cmd/blackbox@latest
 ```
 
-A container image is published as `ghcr.io/bkodzo/blackbox`:
+A container image is published as `ghcr.io/bkodzo/blackbox`. Keep the signing
+key in its own directory, mounted read-only, separate from the log. Run the
+container as your own user so it can write to the mounted directories:
 
 ```
-docker run --rm -v "$PWD:/data" -e HOME=/data ghcr.io/bkodzo/blackbox init
-docker run -d -p 8080:8080 -v "$PWD:/data" -e HOME=/data ghcr.io/bkodzo/blackbox \
-  serve --listen 0.0.0.0:8080 --upstream http://host.docker.internal:PORT
+mkdir -p keys data
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/keys:/keys" \
+  ghcr.io/bkodzo/blackbox init --dir /keys
+
+docker run -d -p 127.0.0.1:8080:8080 --user "$(id -u):$(id -g)" \
+  -v "$PWD/keys:/keys:ro" -v "$PWD/data:/data" \
+  ghcr.io/bkodzo/blackbox serve --listen 0.0.0.0:8080 \
+  --key /keys/key.ed25519 --upstream http://host.docker.internal:PORT
 ```
+
+Inside a container the gateway has to listen on `0.0.0.0`, so publish the port
+only on `127.0.0.1` (as above) or on a private network. The gateway has no
+authentication of its own: anyone who can reach it can use the model server
+through it. Checkpoints are printed to stdout, so `docker logs` or a log
+collector keeps a copy outside the data directory.
 
 ## Quick start
 
