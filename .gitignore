@@ -1,0 +1,11 @@
+# local planning notes
+PLAN.md
+
+# runtime data
+*.jsonl
+.blackbox/
+
+# build output
+/blackbox
+/dist/
+web/node_modules/
