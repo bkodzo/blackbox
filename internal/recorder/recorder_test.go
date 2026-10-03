@@ -34,7 +34,7 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := New(l, "gw-1")
+	rec := New(l, "gw-1", nil)
 	u, _ := url.Parse(up.URL)
 	srv := httptest.NewServer(proxy.New(proxy.Config{Upstream: u, Sink: rec.Submit}))
 
