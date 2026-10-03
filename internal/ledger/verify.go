@@ -185,3 +185,27 @@ func checkParallel(batch []Entry, reasons []string, pub ed25519.PublicKey) {
 	}
 	wg.Wait()
 }
+
+// Scan calls fn for each complete entry in r, in order, without verifying
+// anything. Use Verify when the result must be trusted.
+func Scan(r io.Reader, fn func(Entry) error) error {
+	br := bufio.NewReaderSize(r, 1<<20)
+	var last uint64
+	for {
+		line, err := readLine(br)
+		if err == io.EOF {
+			return nil // a trailing partial line is not an entry
+		}
+		if err != nil {
+			return err
+		}
+		var e Entry
+		if err := json.Unmarshal(line, &e); err != nil {
+			return fmt.Errorf("malformed entry after seq %d: %w", last, err)
+		}
+		if err := fn(e); err != nil {
+			return err
+		}
+		last = e.Seq
+	}
+}
