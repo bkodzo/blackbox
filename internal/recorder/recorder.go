@@ -96,16 +96,23 @@ func Enrich(c proxy.Capture, instanceID string, rm risk.Map) (*record.LLMCall, f
 	rs := &call.Response
 	rs.FinishReason = p.Response.FinishReason
 	rs.Usage = record.Usage{Input: p.Response.Input, Output: p.Response.Output, Total: p.Response.Total}
-	for _, tc := range p.Response.ToolCalls {
+	add := func(tc format.ToolCall, inText bool) {
 		rule := rm.Lookup(tc.Name)
 		rs.ToolCalls = append(rs.ToolCalls, record.ToolCall{
 			ID:        tc.ID,
 			Name:      tc.Name,
 			Arguments: tc.Arguments,
 			ValidJSON: tc.Arguments == "" || json.Valid([]byte(tc.Arguments)),
+			InText:    inText,
 			Risk:      rule.Risk,
 			Category:  rule.Category,
 		})
+	}
+	for _, tc := range p.Response.ToolCalls {
+		add(tc, false)
+	}
+	for _, tc := range p.Response.TextToolCalls {
+		add(tc, true)
 	}
 	if rs.Stream != nil {
 		rs.Stream.Chunks = p.Response.Chunks

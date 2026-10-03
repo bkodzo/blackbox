@@ -173,6 +173,10 @@ func callChecks(call *record.LLMCall) {
 		flag(call, record.AnomalyStreamAborted, "client disconnected after %d chunks", s.Chunks)
 	}
 	for _, tc := range call.Response.ToolCalls {
+		if tc.InText {
+			flag(call, record.AnomalyToolCallInText,
+				"model wrote a call to %q in its reply text instead of making a tool call", tc.Name)
+		}
 		if tc.Risk == risk.High {
 			flag(call, record.AnomalyHighRiskTool, "model requested high-risk tool %q", tc.Name)
 		}

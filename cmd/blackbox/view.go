@@ -128,6 +128,7 @@ func runShow(args []string) int {
 	if found == 0 {
 		return fail("no calls recorded for session %q", fs.Arg(0))
 	}
+	fmt.Println("\n" + showLegend)
 	return 0
 }
 
@@ -141,7 +142,11 @@ func printCall(seq uint64, c *record.LLMCall) {
 		seq, c.Timing.ReceivedAt.Local().Format("15:04:05"), c.Turn, orDash(model),
 		c.Response.Status, latency, c.Response.Usage.Input, c.Response.Usage.Output)
 	for _, tc := range c.Response.ToolCalls {
-		fmt.Printf("      tool     %s %s  [risk: %s]\n", tc.Name, clip(tc.Arguments, 80), orDash(tc.Risk))
+		label := "tool    "
+		if tc.InText {
+			label = "tool*   "
+		}
+		fmt.Printf("      %s %s %s  [risk: %s]\n", label, tc.Name, clip(tc.Arguments, 80), orDash(tc.Risk))
 	}
 	for _, l := range c.ToolResultsIn {
 		if l.MatchedSeq > 0 {
@@ -158,6 +163,9 @@ func printCall(seq uint64, c *record.LLMCall) {
 		fmt.Println("      answer   final response returned")
 	}
 }
+
+// showLegend explains marks used by printCall.
+const showLegend = "tool* = written in the reply text instead of made as a tool call; the agent may not have run it"
 
 func orDash(s string) string {
 	if s == "" {

@@ -127,6 +127,7 @@ type ToolCall struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments,omitempty"`
 	ValidJSON bool   `json:"arguments_valid_json"`
+	InText    bool   `json:"in_text,omitempty"` // written in the reply text, not made as a structured call
 	Risk      string `json:"risk,omitempty"`
 	Category  string `json:"category,omitempty"`
 }
@@ -182,4 +183,5 @@ const (
 	AnomalyModelSubstituted    = "model_substituted"
 	AnomalyStreamAborted       = "stream_aborted"
 	AnomalyHighRiskTool        = "high_risk_tool"
+	AnomalyToolCallInText      = "tool_call_in_text"
 )

@@ -175,3 +175,10 @@ func TestIdleSessionsAreForgotten(t *testing.T) {
 		t.Fatalf("tracking %d sessions, want 1", r.tr.Sessions())
 	}
 }
+
+func TestToolCallInText(t *testing.T) {
+	call := &record.LLMCall{}
+	call.Response.ToolCalls = []record.ToolCall{{Name: "rm", InText: true, Risk: risk.High}}
+	New(0).Observe(call, format.Parsed{})
+	wantKinds(t, call, record.AnomalyToolCallInText, record.AnomalyHighRiskTool)
+}
