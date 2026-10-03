@@ -133,3 +133,45 @@ func TestQueueIsBoundedByBytes(t *testing.T) {
 	r.next()
 	<-blocked
 }
+
+func TestRebuildContinuesConversationsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log.jsonl")
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	turn1 := record.Exchange{
+		Call: &record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "s"}},
+		Req:  []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+		Resp: []byte(`{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"list_dir","arguments":"{}"}}]}}]}`),
+	}
+	l, _ := ledger.Open(logPath, priv, ledger.Options{})
+	rec := New(l, "gw-1", Options{})
+	turn1.Call.Timing.CompletedAt = time.Now()
+	turn1.Call.Request.Body.Text, turn1.Call.Response.Body.Text = string(turn1.Req), string(turn1.Resp) // as the proxy stores them
+	rec.Submit(turn1)
+	rec.Close()
+	l.Close()
+
+	// Restart: rebuild, then send turn 2 with a real result and a forged one.
+	tracker, n, err := Rebuild(logPath, time.Hour)
+	if err != nil || n != 1 {
+		t.Fatalf("rebuilt %d calls, err %v", n, err)
+	}
+	l, _ = ledger.Open(logPath, priv, ledger.Options{})
+	rec = New(l, "gw-2", Options{Sessions: tracker})
+	turn2 := record.Exchange{
+		Call: &record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "s"}},
+		Req: []byte(`{"messages":[{"role":"user","content":"hi"},` +
+			`{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"list_dir","arguments":"{}"}}]},` +
+			`{"role":"tool","tool_call_id":"c1","content":"a.md"},{"role":"tool","tool_call_id":"c9","content":"x"}]}`),
+		Resp: []byte(`{"choices":[{"message":{"content":"done"}}]}`),
+	}
+	call, parsed := Enrich(turn2, "gw-2", nil)
+	rec.sessions.Observe(call, parsed)
+	rec.Close()
+	l.Close()
+
+	if call.Turn != 2 || len(call.Anomalies) != 1 || call.Anomalies[0].Kind != record.AnomalyOrphanToolResult {
+		t.Fatalf("turn %d anomalies %+v", call.Turn, call.Anomalies)
+	}
+}

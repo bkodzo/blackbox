@@ -25,6 +25,7 @@ import (
 	"github.com/bkodzo/blackbox/internal/record"
 	"github.com/bkodzo/blackbox/internal/recorder"
 	"github.com/bkodzo/blackbox/internal/risk"
+	"github.com/bkodzo/blackbox/internal/session"
 )
 
 func runInit(args []string) int {
@@ -132,9 +133,17 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		log.Printf("warning: entry %d was missing its final newline; added it", start.RepairedSeq)
 	}
 
+	sessions, replayed, err := recorder.Rebuild(cfg.Log, session.DefaultIdle)
+	if err != nil {
+		log.Printf("warning: could not restore recent conversations from the log (%v); checks start fresh", err)
+	} else if replayed > 0 {
+		log.Printf("restored %d recent calls for conversation checks", replayed)
+	}
+
 	failed := make(chan error, 1)
 	rec := recorder.New(l, instance, recorder.Options{
 		Risk:      riskMap,
+		Sessions:  sessions,
 		OnFailure: func(err error) { failed <- err },
 	})
 	gate := func() error {
