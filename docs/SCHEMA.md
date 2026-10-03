@@ -6,11 +6,16 @@ The log is a JSON Lines file. Each line is an entry that seals one record.
 
 | Field | Type | Meaning |
 |---|---|---|
+| `v` | integer | Format version, currently 2 |
 | `seq` | integer | Position in the log, starting at 1 |
+| `kid` | hex string | ID of the signing key: the first 8 bytes of the SHA-256 of the public key |
 | `prev` | hex string | `hash` of the previous entry; 64 zeros for the first |
-| `hash` | hex string | SHA-256 of `seq` (8 bytes, big-endian), `prev`, and the `rec` bytes |
-| `sig` | base64 string | Ed25519 signature of `hash` by the gateway key |
-| `rec` | object | The record (below) |
+| `hash` | hex string | SHA-256 of the tag `blackbox/entry/v2`, `seq`, `kid`, `prev`, and the `rec` bytes |
+| `sig` | base64 string | Ed25519 signature of the tag `blackbox/entry-sig/v2` followed by `hash` |
+| `rec` | object | The record (below), stored exactly as it was hashed |
+
+Fields appear in exactly this order with no whitespace. A line that is not
+byte-for-byte the encoding of its parsed fields is rejected.
 
 Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 
@@ -25,7 +30,10 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `key_fingerprint` | Fingerprint of the signing key |
 | `upstream` | Model server URL |
 | `previous_shutdown` | `none` (new log), `clean`, or `unclean` |
-| `recovered_torn_bytes` | Bytes of an incomplete final line removed at startup, if any |
+| `repaired_seq` | Set if the last entry was complete but missing its newline; the newline was added |
+| `quarantined_bytes` | Bytes of an incomplete final line moved out of the log at startup |
+| `quarantine_file` | Where those bytes were saved |
+| `quarantine_sha256` | Hash of those bytes |
 
 ## gateway_stop
 
@@ -34,6 +42,8 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `ts` | Stop time (UTC) |
 | `instance_id` | ID of the run that stopped |
 | `calls` | Calls recorded by this run |
+| `unrecorded` | Calls forwarded but not recorded (only possible in fail-open mode or at a write failure) |
+| `aborted_at_shutdown` | Calls cancelled when the shutdown grace period ended; each is recorded |
 
 ## llm_call
 
@@ -43,6 +53,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 |---|---|
 | `agent.id`, `agent.version` | From `X-Blackbox-Agent` and `X-Blackbox-Agent-Version` |
 | `session.id`, `session.parent_id` | From `X-Blackbox-Session` and `X-Blackbox-Parent-Session` |
+| `session.conversation` | For calls without a session ID: a hash identifying the conversation they continue |
 | `principal` | From `X-Blackbox-Principal`: the person or service the agent acts for |
 | `credential_fp` | `sha256:` and the first 8 bytes of the hash of the API key. The key is never stored |
 | `client.ip`, `client.user_agent` | Where the call came from |
@@ -88,6 +99,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `response.tool_calls[]` | `id`, `name`, `arguments`, `arguments_valid_json`, `in_text`, `risk`, `category` |
 | `response.usage` | `input`, `output`, and `total` tokens |
 | `response.stream` | For streamed responses: `chunks` and `outcome` (`completed`, `client_aborted`, `upstream_error`) |
+| `response.upgraded` | True if the server switched protocols (status 101); traffic after the switch is not recorded |
 | `response.body` | See Body |
 
 `in_text` is true for a tool call the model wrote into its reply text instead of
@@ -97,7 +109,7 @@ making it. The agent may not have run it.
 
 | Field | Meaning |
 |---|---|
-| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, or `client_aborted` |
+| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, `client_aborted`, `gateway_shutdown`, or `request_too_large` |
 | `error.message` | Detail |
 | `timing.received_at` | Request received by the gateway |
 | `timing.upstream_sent_at` | Request sent to the model server |
@@ -127,9 +139,10 @@ All times are RFC 3339 in UTC.
 
 | Kind | Meaning |
 |---|---|
-| `orphan_tool_result` | A tool result answers a call the model never made in this session |
-| `history_rewritten` | An earlier message, or the model's tool calls, changed between turns |
-| `history_truncated` | The request has fewer messages than the previous turn |
+| `orphan_tool_result` | A tool result answers a call the model never made in this conversation |
+| `unverifiable_tool_result` | A tool result arrived with no earlier turn to check it against |
+| `history_rewritten` | An earlier message, or the model's tool calls or reply text, changed between turns |
+| `history_truncated` | Older messages were dropped since the previous turn |
 | `toolset_changed` | The tools offered changed since the previous turn |
 | `system_prompt_changed` | The system prompt changed since the previous turn |
 | `model_substituted` | The model that answered differs from the one requested |
@@ -139,8 +152,17 @@ All times are RFC 3339 in UTC.
 
 ## Checkpoint file
 
-One JSON object per line: `seq`, `hash`, and `sig` of the newest durable entry
-at the time, and `ts`. The signature is the entry's own.
+One JSON object per line, in this exact form:
+
+| Field | Meaning |
+|---|---|
+| `v` | Format version, currently 2 |
+| `log` | Hash of entry 1, identifying the log |
+| `seq` | Sequence number of the checkpointed entry |
+| `hash` | Hash of that entry |
+| `ts` | When the checkpoint was written (RFC 3339, UTC) |
+| `kid` | ID of the signing key |
+| `sig` | Ed25519 signature over the tag `blackbox/checkpoint/v2` and every field above |
 
 ## Risk map
 
