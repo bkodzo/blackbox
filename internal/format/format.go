@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 )
 
 // Format names.
@@ -57,7 +58,9 @@ type Response struct {
 	FinishReason      string
 	SystemFingerprint string
 	ToolCalls         []ToolCall
-	Input, Output     int // token usage
+	Text              string     // assistant text, concatenated across parts and chunks
+	TextToolCalls     []ToolCall // tool calls the model wrote as text instead of making them
+	Input, Output     int        // token usage
 	Total             int
 	Chunks            int // stream events, 0 for non-streamed responses
 }
@@ -91,6 +94,7 @@ func Parse(req, resp []byte, sse bool) Parsed {
 	if p.Response.Total == 0 {
 		p.Response.Total = p.Response.Input + p.Response.Output
 	}
+	p.Response.TextToolCalls = findTextToolCalls(p.Response.Text)
 	return p
 }
 
@@ -220,6 +224,7 @@ type chatToolCall struct {
 
 type contentBlock struct {
 	Type  string          `json:"type"`
+	Text  string          `json:"text"`
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
@@ -234,7 +239,8 @@ type body struct {
 	Choices           []struct {
 		FinishReason string `json:"finish_reason"`
 		Message      struct {
-			ToolCalls []chatToolCall `json:"tool_calls"`
+			Content   json.RawMessage `json:"content"`
+			ToolCalls []chatToolCall  `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
 	StopReason string         `json:"stop_reason"`
@@ -254,6 +260,7 @@ func parseBody(b []byte, r *Response) string {
 			if c.FinishReason != "" {
 				r.FinishReason = c.FinishReason
 			}
+			r.Text += textOf(c.Message.Content)
 			for _, tc := range c.Message.ToolCalls {
 				r.ToolCalls = append(r.ToolCalls, ToolCall{tc.ID, tc.Function.Name, tc.Function.Arguments})
 			}
@@ -262,7 +269,10 @@ func parseBody(b []byte, r *Response) string {
 	case v.Type == "message" || v.Content != nil:
 		r.FinishReason = v.StopReason
 		for _, c := range v.Content {
-			if c.Type == "tool_use" {
+			switch c.Type {
+			case "text":
+				r.Text += c.Text
+			case "tool_use":
 				r.ToolCalls = append(r.ToolCalls, ToolCall{c.ID, c.Name, string(compact(c.Input))})
 			}
 		}
@@ -280,6 +290,7 @@ type event struct {
 	Choices           []struct {
 		FinishReason string `json:"finish_reason"`
 		Delta        struct {
+			Content   string         `json:"content"`
 			ToolCalls []chatToolCall `json:"tool_calls"`
 		} `json:"delta"`
 	} `json:"choices"`
@@ -292,6 +303,7 @@ type event struct {
 	Delta        struct {
 		StopReason  string `json:"stop_reason"`
 		PartialJSON string `json:"partial_json"`
+		Text        string `json:"text"`
 	} `json:"delta"`
 }
 
@@ -310,6 +322,7 @@ func parseStream(b []byte, r *Response) string {
 		return c
 	}
 	args := map[int]*bytes.Buffer{}
+	var text strings.Builder
 
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	sc.Buffer(make([]byte, 0, 64<<10), 64<<20)
@@ -338,6 +351,7 @@ func parseStream(b []byte, r *Response) string {
 				if c.FinishReason != "" {
 					r.FinishReason = c.FinishReason
 				}
+				text.WriteString(c.Delta.Content)
 				for _, d := range c.Delta.ToolCalls {
 					tc := call(d.Index)
 					if d.ID != "" {
@@ -371,6 +385,7 @@ func parseStream(b []byte, r *Response) string {
 			if buf, ok := args[e.Index]; ok {
 				buf.WriteString(e.Delta.PartialJSON)
 			}
+			text.WriteString(e.Delta.Text)
 		case "message_delta":
 			format = Blocks
 			if e.Delta.StopReason != "" {
@@ -379,6 +394,7 @@ func parseStream(b []byte, r *Response) string {
 		}
 	}
 
+	r.Text = text.String()
 	for _, i := range order {
 		tc := calls[i]
 		if buf, ok := args[i]; ok {

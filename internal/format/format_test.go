@@ -166,3 +166,47 @@ func FuzzParse(f *testing.F) {
 		Parse(req, resp, sse) // must never panic
 	})
 }
+
+func TestTextToolCalls(t *testing.T) {
+	cases := []struct {
+		name, text string
+		want       []ToolCall
+	}{
+		{"bare call", `{"name":"list_dir","parameters":{"path":"."}}`,
+			[]ToolCall{{Name: "list_dir", Arguments: `{"path":"."}`}}},
+		{"two calls in prose", `Sure. {"name": "rm", "parameters": {"path": "notes.md"}}; {"name": "rm", "parameters": {"path": "plan.txt"}} Done.`,
+			[]ToolCall{{Name: "rm", Arguments: `{"path":"notes.md"}`}, {Name: "rm", Arguments: `{"path":"plan.txt"}`}}},
+		{"wrapped and string arguments", "```json\n{\"function\":{\"name\":\"run_shell\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n```",
+			[]ToolCall{{Name: "run_shell", Arguments: `{"cmd":"ls"}`}}},
+		{"plain prose", "Use {braces} carefully, and {not json either.", nil},
+		{"object without arguments", `{"name":"report","pages":3}`, nil},
+		{"name is a sentence", `{"name":"delete all the files","arguments":{}}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := findTextToolCalls(c.text); !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("got %+v\nwant %+v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestTextIsCollectedFromEveryShape(t *testing.T) {
+	call := `{\"name\":\"rm\",\"parameters\":{\"path\":\"a.md\"}}`
+	chat := `{"choices":[{"finish_reason":"stop","message":{"content":"` + call + `"}}]}`
+	parts := `{"choices":[{"message":{"content":[{"type":"text","text":"` + call + `"}]}}]}`
+	blocks := `{"type":"message","content":[{"type":"text","text":"` + call + `"}]}`
+	chatStream := "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"name\\\":\\\"rm\\\",\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"\\\"parameters\\\":{\\\"path\\\":\\\"a.md\\\"}}\"}}]}\n\n"
+	blockStream := "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + call + "\"}}\n"
+
+	for name, tc := range map[string]struct {
+		resp string
+		sse  bool
+	}{"chat": {chat, false}, "parts": {parts, false}, "blocks": {blocks, false}, "chat stream": {chatStream, true}, "block stream": {blockStream, true}} {
+		p := Parse(nil, []byte(tc.resp), tc.sse)
+		if len(p.Response.TextToolCalls) != 1 || p.Response.TextToolCalls[0].Name != "rm" {
+			t.Errorf("%s: text %q, calls %+v", name, p.Response.Text, p.Response.TextToolCalls)
+		}
+	}
+}
