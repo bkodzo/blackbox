@@ -251,7 +251,8 @@ func (l *Ledger) quarantine(path string, tail []byte, end int64) error {
 	if err := errors.Join(werr, serr, q.Close()); err != nil {
 		return fmt.Errorf("ledger: saving incomplete final line: %w", err)
 	}
-	if err := l.f.Truncate(end); err != nil {
+	// Truncate by path: on Windows an append-only handle cannot truncate.
+	if err := os.Truncate(path, end); err != nil {
 		return err
 	}
 	l.rec.QuarantinedBytes = int64(len(tail))
@@ -280,7 +281,7 @@ func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
 		if err != nil {
 			return err
 		}
-		if err := l.cp.Truncate(st.Size() - torn); err != nil {
+		if err := os.Truncate(l.opt.CheckpointPath, st.Size()-torn); err != nil {
 			return err
 		}
 	}
