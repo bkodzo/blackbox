@@ -53,7 +53,9 @@ func main() {
 	os.Exit(code)
 }
 
-func fail(format string, args ...any) int {
+func fail(format string, args ...any) int { return failCode(1, format, args...) }
+
+func failCode(code int, format string, args ...any) int {
 	fmt.Fprintf(os.Stderr, "blackbox: "+format+"\n", args...)
-	return 1
+	return code
 }
