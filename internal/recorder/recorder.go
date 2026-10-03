@@ -1,0 +1,100 @@
+// Package recorder turns captured exchanges into audit records and appends
+// them to the ledger. It runs on its own goroutine so parsing, hashing, and
+// signing never delay the agent.
+package recorder
+
+import (
+	"encoding/json"
+	"log"
+	"sync/atomic"
+
+	"github.com/bkodzo/blackbox/internal/format"
+	"github.com/bkodzo/blackbox/internal/ledger"
+	"github.com/bkodzo/blackbox/internal/proxy"
+	"github.com/bkodzo/blackbox/internal/record"
+)
+
+// queueSize bounds captures waiting to be written. When full, Submit blocks:
+// the gateway slows down rather than dropping audit records.
+const queueSize = 1024
+
+// Recorder consumes captures in arrival order.
+type Recorder struct {
+	l          *ledger.Ledger
+	instanceID string
+	ch         chan proxy.Capture
+	done       chan struct{}
+	calls      atomic.Uint64
+}
+
+// New starts a recorder writing to l. Records carry instanceID so they can be
+// tied to the gateway_start entry of the process that wrote them.
+func New(l *ledger.Ledger, instanceID string) *Recorder {
+	r := &Recorder{l: l, instanceID: instanceID, ch: make(chan proxy.Capture, queueSize), done: make(chan struct{})}
+	go r.run()
+	return r
+}
+
+// Submit queues a capture. It is the proxy's Sink.
+func (r *Recorder) Submit(c proxy.Capture) { r.ch <- c }
+
+// Close drains the queue. No Submit calls may happen after Close.
+func (r *Recorder) Close() {
+	close(r.ch)
+	<-r.done
+}
+
+// Calls returns how many calls have been written.
+func (r *Recorder) Calls() uint64 { return r.calls.Load() }
+
+func (r *Recorder) run() {
+	defer close(r.done)
+	for c := range r.ch {
+		call := Enrich(c, r.instanceID)
+		b, err := json.Marshal(call)
+		if err != nil {
+			log.Printf("blackbox: encoding record: %v", err)
+			continue
+		}
+		if _, _, err := r.l.Append(b); err != nil {
+			log.Printf("blackbox: AUDIT RECORD NOT WRITTEN: %v", err)
+			continue
+		}
+		r.calls.Add(1)
+	}
+}
+
+// Enrich fills the fields that require reading the payloads.
+func Enrich(c proxy.Capture, instanceID string) *record.LLMCall {
+	call := c.Call
+	call.InstanceID = instanceID
+	p := format.Parse(c.Req, c.Resp, c.SSE)
+	call.Format = p.Format
+
+	rq := &call.Request
+	rq.ModelRequested = p.Request.Model
+	rq.Stream = p.Request.Stream
+	rq.MessageCount = len(p.Request.Messages)
+	rq.SystemSHA256 = p.Request.SystemSHA256
+	rq.ToolsOffered = p.Request.Tools
+	rq.ToolsSHA256 = p.Request.ToolsSHA256
+
+	call.Upstream.ModelServed = p.Response.Model
+	call.Upstream.SystemFingerprint = p.Response.SystemFingerprint
+
+	rs := &call.Response
+	rs.FinishReason = p.Response.FinishReason
+	rs.Usage = record.Usage{Input: p.Response.Input, Output: p.Response.Output, Total: p.Response.Total}
+	for _, tc := range p.Response.ToolCalls {
+		rs.ToolCalls = append(rs.ToolCalls, record.ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Name,
+			Arguments: tc.Arguments,
+			ValidJSON: tc.Arguments == "" || json.Valid([]byte(tc.Arguments)),
+		})
+	}
+	if rs.Stream != nil {
+		rs.Stream.Chunks = p.Response.Chunks
+	}
+	return call
+}
