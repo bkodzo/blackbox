@@ -21,7 +21,13 @@ type GatewayStart struct {
 	KeyFingerprint   string    `json:"key_fingerprint"`
 	Upstream         string    `json:"upstream"`
 	PreviousShutdown string    `json:"previous_shutdown"` // "none", "clean" or "unclean"
-	RecoveredBytes   int64     `json:"recovered_torn_bytes,omitempty"`
+
+	// Set when the log ended without a newline at startup. A complete entry
+	// is kept (RepairedSeq); anything else is moved to QuarantineFile.
+	RepairedSeq      uint64 `json:"repaired_seq,omitempty"`
+	QuarantinedBytes int64  `json:"quarantined_bytes,omitempty"`
+	QuarantineFile   string `json:"quarantine_file,omitempty"`
+	QuarantineSHA256 string `json:"quarantine_sha256,omitempty"`
 }
 
 // GatewayStop is written on clean shutdown.

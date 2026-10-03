@@ -30,7 +30,7 @@ func runVerify(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	cps, err := ledger.ReadCheckpoints(*cpPath)
+	cps, cpTorn, err := ledger.ReadCheckpoints(*cpPath)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -57,6 +57,17 @@ func runVerify(args []string) int {
 					"seq %d: gateway started again without a clean shutdown before it; calls in flight at the time may be missing", e.Seq))
 			}
 			running = true
+			var s record.GatewayStart
+			json.Unmarshal(e.Rec, &s)
+			if s.QuarantinedBytes > 0 {
+				warnings = append(warnings, fmt.Sprintf(
+					"seq %d: at startup the gateway moved %d bytes of an incomplete line to %s (sha256 %s)",
+					e.Seq, s.QuarantinedBytes, s.QuarantineFile, s.QuarantineSHA256))
+			}
+			if s.RepairedSeq > 0 {
+				warnings = append(warnings, fmt.Sprintf(
+					"seq %d: at startup entry %d was missing its final newline; the gateway added it", e.Seq, s.RepairedSeq))
+			}
 		case record.TypeGatewayStop:
 			running = false
 		case record.TypeLLMCall:
@@ -81,8 +92,17 @@ func runVerify(args []string) int {
 		return fail("%v", err)
 	}
 
-	if res.TornTail {
-		warnings = append(warnings, "the log ends in an incomplete line (a crash during a write); the gateway removes it on next start")
+	if res.TornBytes > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"the log ends in an incomplete line of %d bytes (an interrupted write); the gateway moves it to a quarantine file on next start",
+			res.TornBytes))
+	}
+	if res.Unterminated {
+		warnings = append(warnings, fmt.Sprintf(
+			"entry %d is valid but missing its final newline; the gateway adds it on next start", res.Entries))
+	}
+	if cpTorn > 0 {
+		warnings = append(warnings, "the checkpoint file ends in an incomplete line (an interrupted write); it was ignored")
 	}
 	if len(cps) == 0 {
 		warnings = append(warnings, "no checkpoints found, so entries removed from the end of the log cannot be detected")

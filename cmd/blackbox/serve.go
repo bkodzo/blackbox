@@ -106,7 +106,10 @@ func runServe(args []string) int {
 		KeyFingerprint:   ledger.Fingerprint(key.Public().(ed25519.PublicKey)),
 		Upstream:         upstream.String(),
 		PreviousShutdown: previousShutdown(l),
-		RecoveredBytes:   l.TornBytes(),
+		RepairedSeq:      l.Recovery().RepairedSeq,
+		QuarantinedBytes: l.Recovery().QuarantinedBytes,
+		QuarantineFile:   l.Recovery().QuarantineFile,
+		QuarantineSHA256: l.Recovery().QuarantineSHA256,
 	}
 	if err := appendJSON(l, start); err != nil {
 		l.Close()
@@ -115,8 +118,11 @@ func runServe(args []string) int {
 	if start.PreviousShutdown == "unclean" {
 		log.Printf("warning: the previous gateway run did not shut down cleanly")
 	}
-	if start.RecoveredBytes > 0 {
-		log.Printf("warning: removed %d bytes of an incomplete final log line", start.RecoveredBytes)
+	if start.QuarantinedBytes > 0 {
+		log.Printf("warning: moved %d bytes of an incomplete final log line to %s", start.QuarantinedBytes, start.QuarantineFile)
+	}
+	if start.RepairedSeq > 0 {
+		log.Printf("warning: entry %d was missing its final newline; added it", start.RepairedSeq)
 	}
 
 	rec := recorder.New(l, instance, riskMap)

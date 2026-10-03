@@ -1,14 +1,16 @@
 // Package ledger is an append-only, tamper-evident log.
 //
-// Each line is an envelope around one record:
+// Each line is an entry that seals one record:
 //
-//	{"seq":42,"prev":"<hex>","hash":"<hex>","sig":"<base64>","rec":{...}}
+//	{"v":2,"seq":42,"kid":"<key id>","prev":"<hex>","hash":"<hex>","sig":"<base64>","rec":{...}}
 //
-// hash = SHA-256(seq as 8 big-endian bytes, then prev hash, then rec bytes), and sig is
-// an Ed25519 signature over hash. The rec bytes are hashed exactly as written,
-// so verification never re-encodes JSON. Chaining catches edits, deletions and
-// reordering; signatures stop an attacker without the key from rebuilding the
-// chain; checkpoints kept elsewhere catch records cut from the end.
+// The hash covers the sequence number, key ID, previous hash, and the record
+// bytes exactly as written; the signature covers the hash. Both are
+// domain-separated. Chaining catches edits, deletions, and reordering;
+// signatures stop anyone without the key from rebuilding the chain; signed
+// checkpoints kept elsewhere catch entries cut from the end. Every entry and
+// checkpoint has exactly one valid encoding, so other JSON parsers cannot be
+// shown different content than the verifier checked.
 package ledger
 
 import (
@@ -16,90 +18,36 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Entry is one line of the log: a record plus the fields that seal it.
-type Entry struct {
-	Seq  uint64          `json:"seq"`
-	Prev string          `json:"prev"`
-	Hash string          `json:"hash"`
-	Sig  string          `json:"sig"`
-	Rec  json.RawMessage `json:"rec"`
-}
-
-// GenesisPrev is the prev hash of the first entry.
-var GenesisPrev = hex.EncodeToString(make([]byte, sha256.Size))
-
-func chainHash(seq uint64, prev, rec []byte) [sha256.Size]byte {
-	h := sha256.New()
-	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], seq)
-	h.Write(b[:])
-	h.Write(prev)
-	h.Write(rec)
-	var sum [sha256.Size]byte
-	h.Sum(sum[:0])
-	return sum
-}
-
-// appendLine encodes e as a log line. Built by hand so rec is copied verbatim.
-func (e *Entry) appendLine(b []byte) []byte {
-	b = append(b, `{"seq":`...)
-	b = strconv.AppendUint(b, e.Seq, 10)
-	b = append(b, `,"prev":"`...)
-	b = append(b, e.Prev...)
-	b = append(b, `","hash":"`...)
-	b = append(b, e.Hash...)
-	b = append(b, `","sig":"`...)
-	b = append(b, e.Sig...)
-	b = append(b, `","rec":`...)
-	b = append(b, e.Rec...)
-	return append(b, "}\n"...)
-}
-
-// check recomputes the entry's hash from its own fields and verifies its
-// signature. It returns the decoded hash, or a reason the entry is invalid.
-func (e *Entry) check(pub ed25519.PublicKey) ([]byte, string) {
-	prev, err := hex.DecodeString(e.Prev)
-	if err != nil || len(prev) != sha256.Size {
-		return nil, "malformed prev hash"
-	}
-	sum := chainHash(e.Seq, prev, e.Rec)
-	if hex.EncodeToString(sum[:]) != e.Hash {
-		return nil, "contents were modified (hash mismatch)"
-	}
-	sig, err := base64.StdEncoding.DecodeString(e.Sig)
-	if err != nil || !ed25519.Verify(pub, sum[:], sig) {
-		return nil, "signature is invalid (not written by this gateway's key)"
-	}
-	return sum[:], ""
-}
-
-// Options tune durability and checkpointing. Zero values pick defaults.
+// Options tune durability, memory, and checkpointing. Zero values pick defaults.
 type Options struct {
 	// Sync makes every Append durable before it returns. Otherwise appends are
 	// group-committed: flushed every FlushInterval or FlushRecords appends.
 	Sync          bool
 	FlushInterval time.Duration // default 50ms
 	FlushRecords  int           // default 64
+	// MaxPending bounds encoded entries waiting to be written. Append blocks
+	// once it is reached, so a slow disk slows the gateway down instead of
+	// growing memory without limit.
+	MaxPending int // default 64 MiB
 
-	// CheckpointPath receives a signed copy of the head after durable flushes,
-	// at most every CheckpointRecords records or CheckpointInterval.
+	// CheckpointPath receives a signed checkpoint after durable flushes, at
+	// most every CheckpointRecords records or CheckpointInterval.
 	CheckpointPath     string
 	CheckpointRecords  uint64        // default 1000
 	CheckpointInterval time.Duration // default 5m
 	// CheckpointMirror, if set, also receives every checkpoint line, so a copy
-	// can live outside this machine (e.g. stdout shipped to a log collector).
+	// can live outside this machine. It is written from its own goroutine and
+	// never blocks the ledger; lines are dropped (and counted) if it falls behind.
 	CheckpointMirror io.Writer
 }
 
@@ -110,6 +58,9 @@ func (o *Options) setDefaults() {
 	if o.FlushRecords <= 0 {
 		o.FlushRecords = 64
 	}
+	if o.MaxPending <= 0 {
+		o.MaxPending = 64 << 20
+	}
 	if o.CheckpointRecords == 0 {
 		o.CheckpointRecords = 1000
 	}
@@ -118,33 +69,39 @@ func (o *Options) setDefaults() {
 	}
 }
 
-// Checkpoint is a signed statement of the log's head at a point in time.
-// Its signature is the head entry's own signature, so it cannot be forged
-// without the key.
-type Checkpoint struct {
-	Seq  uint64    `json:"seq"`
-	Hash string    `json:"hash"`
-	Sig  string    `json:"sig"`
-	Time time.Time `json:"ts"`
+// Recovery describes what Open found after the last complete line.
+type Recovery struct {
+	// RepairedSeq is set when the final entry was complete and validly signed
+	// but missing its newline; the newline was added and the entry kept.
+	RepairedSeq uint64
+	// QuarantinedBytes are bytes of an incomplete final line (an interrupted
+	// write). They are moved to QuarantineFile, never discarded.
+	QuarantinedBytes int64
+	QuarantineFile   string
+	QuarantineSHA256 string
 }
 
 // Ledger appends entries to a log file. It is safe for concurrent use.
 //
 // Appends only touch an in-memory buffer under mu. A background flusher swaps
 // that buffer out under mu, then writes and fsyncs without holding it, so
-// appenders never wait on the disk unless Options.Sync is set. (On some
-// systems a write blocks while an fsync of the same file is in progress, so
-// even the write must happen outside mu.)
+// appenders never wait on the disk unless Options.Sync is set or the buffer
+// is full. (On some systems a write blocks while an fsync of the same file is
+// in progress, so even the write must happen outside mu.)
 type Ledger struct {
 	opt Options
 	key ed25519.PrivateKey
+	kid string
 	f   *os.File
+	rec Recovery
 
 	mu      sync.Mutex // guards the fields below
+	drained *sync.Cond // signalled when pend is swapped out or the ledger fails
 	pend    []byte     // encoded entries not yet written to the file
 	size    int64      // bytes in the file, including pending ones
 	seq     uint64
 	head    []byte
+	logID   string // hash of entry 1
 	last    *Entry
 	pending int   // appended but not yet written out
 	err     error // sticky: once a write fails, the ledger stops accepting
@@ -157,7 +114,10 @@ type Ledger struct {
 	cpSeq   uint64
 	cpTime  time.Time
 
-	torn int64 // bytes of an incomplete final line removed at Open
+	mirror        chan []byte
+	mirrorDone    chan struct{}
+	mirrorDropped atomic.Uint64
+
 	kick chan struct{}
 	stop chan struct{}
 	done chan struct{}
@@ -166,73 +126,194 @@ type Ledger struct {
 // ErrClosed is returned by Append after Close.
 var ErrClosed = errors.New("ledger: closed")
 
-// Open opens or creates the log at path and resumes its chain. If the file
-// ends in an incomplete line (a crash mid-write), that line is removed and
-// reported by TornBytes. The last entry must verify against key.
+// Open opens or creates the log at path and resumes its chain.
+//
+// If the file ends without a newline, the trailing bytes are kept if they are
+// the next validly signed entry, and otherwise moved to a quarantine file.
+// Open refuses a log that is shorter than, or disagrees with, its own latest
+// checkpoint: that means entries were removed and the chain must not be
+// extended over the gap.
 func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 	opt.setDefaults()
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	l := &Ledger{opt: opt, key: key, f: f, head: make([]byte, sha256.Size), cpTime: time.Now()}
-
-	line, torn, err := recoverTail(f)
-	if err != nil {
+	pub := key.Public().(ed25519.PublicKey)
+	l := &Ledger{opt: opt, key: key, kid: KeyID(pub), f: f, head: make([]byte, sha256.Size), cpTime: time.Now()}
+	l.drained = sync.NewCond(&l.mu)
+	if err := l.resume(path, pub); err != nil {
 		f.Close()
 		return nil, err
 	}
-	l.torn = torn
-	if l.size, err = f.Seek(0, io.SeekEnd); err != nil {
-		f.Close()
+	if err := l.openCheckpoints(pub); err != nil {
+		l.closeFiles()
 		return nil, err
 	}
-	if line != nil {
-		var e Entry
-		if err := json.Unmarshal(line, &e); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("ledger: last entry is malformed: %w", err)
-		}
-		head, reason := e.check(key.Public().(ed25519.PublicKey))
-		if reason != "" {
-			f.Close()
-			return nil, fmt.Errorf("ledger: last entry (seq %d) %s; run `blackbox verify`", e.Seq, reason)
-		}
-		l.seq, l.head, l.last, l.durable = e.Seq, head, &e, &e
-	}
 
-	if opt.CheckpointPath != "" {
-		if l.cp, err = os.OpenFile(opt.CheckpointPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600); err != nil {
-			f.Close()
-			return nil, err
-		}
-		cpLine, _, err := recoverTail(l.cp)
-		if err != nil {
-			l.closeFiles()
-			return nil, err
-		}
-		var c Checkpoint
-		if cpLine != nil && json.Unmarshal(cpLine, &c) == nil {
-			l.cpSeq = c.Seq
-		}
+	if opt.CheckpointMirror != nil {
+		l.mirror, l.mirrorDone = make(chan []byte, 64), make(chan struct{})
+		go func() {
+			defer close(l.mirrorDone)
+			for b := range l.mirror {
+				opt.CheckpointMirror.Write(b)
+			}
+		}()
 	}
-
 	l.kick = make(chan struct{}, 1)
 	l.stop, l.done = make(chan struct{}), make(chan struct{})
 	go l.loop()
 	return l, nil
 }
 
-// recoverTail returns the last complete line of f and truncates any bytes
-// after it (an interrupted write), returning how many were removed.
-func recoverTail(f *os.File) (line []byte, torn int64, err error) {
+// resume reads the end of the log, handles an unterminated tail, and restores
+// the chain state.
+func (l *Ledger) resume(path string, pub ed25519.PublicKey) error {
+	line, end, size, err := readTail(l.f)
+	if err != nil {
+		return err
+	}
+	if line != nil {
+		e, err := ParseEntry(line)
+		if err != nil {
+			return fmt.Errorf("ledger: last entry is malformed (%v); run `blackbox verify`", err)
+		}
+		head, reason := e.check(pub, l.kid)
+		if reason != "" {
+			return fmt.Errorf("ledger: last entry (seq %d) %s; run `blackbox verify`", e.Seq, reason)
+		}
+		l.seq, l.head, l.last, l.durable = e.Seq, head, &e, &e
+	}
+
+	if end < size {
+		tail := make([]byte, size-end)
+		if _, err := l.f.ReadAt(tail, end); err != nil {
+			return err
+		}
+		if e, head, ok := l.continues(tail, pub); ok {
+			if _, err := l.f.Write([]byte{'\n'}); err != nil {
+				return err
+			}
+			l.seq, l.head, l.last, l.durable = e.Seq, head, &e, &e
+			l.rec.RepairedSeq = e.Seq
+		} else if err := l.quarantine(path, tail, end); err != nil {
+			return err
+		}
+		if err := l.f.Sync(); err != nil {
+			return err
+		}
+	}
+	if l.size, err = l.f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+
+	switch {
+	case l.seq == 1:
+		l.logID = hex.EncodeToString(l.head)
+	case l.seq > 1:
+		first, err := readFirstLine(l.f)
+		if err != nil {
+			return err
+		}
+		e, err := ParseEntry(first)
+		if err != nil {
+			return fmt.Errorf("ledger: first entry is malformed (%v); run `blackbox verify`", err)
+		}
+		if _, reason := e.check(pub, l.kid); reason != "" || e.Seq != 1 {
+			return fmt.Errorf("ledger: first entry is invalid; run `blackbox verify`")
+		}
+		l.logID = e.Hash
+	}
+	return nil
+}
+
+// continues reports whether tail is the complete, validly signed next entry.
+func (l *Ledger) continues(tail []byte, pub ed25519.PublicKey) (Entry, []byte, bool) {
+	e, err := ParseEntry(tail)
+	if err != nil || e.Seq != l.seq+1 || e.Prev != hex.EncodeToString(l.head) {
+		return Entry{}, nil, false
+	}
+	head, reason := e.check(pub, l.kid)
+	return e, head, reason == ""
+}
+
+// quarantine moves an incomplete final line into a side file, then removes it
+// from the log so the chain can continue. Nothing is discarded.
+func (l *Ledger) quarantine(path string, tail []byte, end int64) error {
+	sum := sha256.Sum256(tail)
+	name := fmt.Sprintf("%s.torn-%d", path, time.Now().UnixNano())
+	q, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("ledger: saving incomplete final line: %w", err)
+	}
+	_, werr := q.Write(tail)
+	serr := q.Sync()
+	if err := errors.Join(werr, serr, q.Close()); err != nil {
+		return fmt.Errorf("ledger: saving incomplete final line: %w", err)
+	}
+	if err := l.f.Truncate(end); err != nil {
+		return err
+	}
+	l.rec.QuarantinedBytes = int64(len(tail))
+	l.rec.QuarantineFile = name
+	l.rec.QuarantineSHA256 = hex.EncodeToString(sum[:])
+	return nil
+}
+
+// openCheckpoints opens the checkpoint file and checks the log against it.
+func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
+	if l.opt.CheckpointPath == "" {
+		return nil
+	}
+	var err error
+	if l.cp, err = os.OpenFile(l.opt.CheckpointPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600); err != nil {
+		return err
+	}
+	cps, torn, err := readCheckpoints(l.cp)
+	if err != nil {
+		return fmt.Errorf("ledger: %s: %w", l.opt.CheckpointPath, err)
+	}
+	if torn > 0 {
+		// A checkpoint only restates a signed entry, so an interrupted
+		// checkpoint write loses nothing; drop it so the file stays parseable.
+		st, err := l.cp.Stat()
+		if err != nil {
+			return err
+		}
+		if err := l.cp.Truncate(st.Size() - torn); err != nil {
+			return err
+		}
+	}
+	for _, c := range cps {
+		if err := c.verify(pub, l.kid); err != nil {
+			return fmt.Errorf("ledger: %v; run `blackbox verify`", err)
+		}
+		if c.Seq > l.seq {
+			return fmt.Errorf("ledger: the log ends at seq %d but a signed checkpoint covers seq %d; "+
+				"entries were removed. Refusing to continue the chain; run `blackbox verify`", l.seq, c.Seq)
+		}
+		if c.Log != l.logID {
+			return fmt.Errorf("ledger: checkpoint at seq %d belongs to a different log; run `blackbox verify`", c.Seq)
+		}
+		if c.Seq == l.seq && c.Hash != l.last.Hash {
+			return fmt.Errorf("ledger: entry %d differs from its signed checkpoint; run `blackbox verify`", c.Seq)
+		}
+		l.cpSeq = max(l.cpSeq, c.Seq)
+	}
+	return nil
+}
+
+// readTail returns the last complete line of f (without its newline), the
+// offset just after it, and the file size. Nothing is modified.
+func readTail(f *os.File) (line []byte, end, size int64, err error) {
 	st, err := f.Stat()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	size := st.Size()
+	size = st.Size()
 	var buf []byte // holds file bytes [pos, size)
-	pos, end := size, int64(-1)
+	pos := size
+	end = -1
 	for chunk := int64(64 << 10); ; chunk *= 2 {
 		if pos == 0 {
 			if end > 0 {
@@ -244,7 +325,7 @@ func recoverTail(f *os.File) (line []byte, torn int64, err error) {
 		pos -= n
 		b := make([]byte, n, n+int64(len(buf)))
 		if _, err := f.ReadAt(b, pos); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		buf = append(b, buf...)
 		if end < 0 {
@@ -260,28 +341,37 @@ func recoverTail(f *os.File) (line []byte, torn int64, err error) {
 			break
 		}
 	}
-	if end < 0 {
-		end = 0
-	}
-	if end < size {
-		if err := f.Truncate(end); err != nil {
-			return nil, 0, err
-		}
-		if err := f.Sync(); err != nil {
-			return nil, 0, err
-		}
-	}
-	return line, size - end, nil
+	return line, max(end, 0), size, nil
 }
 
-// Append seals rec (single-line JSON) as the next entry and returns it with
-// its byte offset in the file. Unless Options.Sync is set, the entry becomes
-// durable at the next group commit.
+func readFirstLine(f *os.File) ([]byte, error) {
+	var line []byte
+	buf := make([]byte, 64<<10)
+	for off := int64(0); ; {
+		n, err := f.ReadAt(buf, off)
+		if i := bytes.IndexByte(buf[:n], '\n'); i >= 0 {
+			return append(line, buf[:i]...), nil
+		}
+		line = append(line, buf[:n]...)
+		off += int64(n)
+		if err != nil {
+			return nil, fmt.Errorf("ledger: reading first entry: %w", err)
+		}
+	}
+}
+
+// Append seals rec (a single-line JSON object) as the next entry and returns
+// it with its byte offset in the file. Unless Options.Sync is set, the entry
+// becomes durable at the next group commit.
 func (l *Ledger) Append(rec []byte) (Entry, int64, error) {
-	if len(rec) == 0 || bytes.IndexByte(rec, '\n') >= 0 {
-		return Entry{}, 0, errors.New("ledger: record must be non-empty single-line JSON")
+	if len(rec) == 0 || rec[0] != '{' || bytes.IndexByte(rec, '\n') >= 0 {
+		return Entry{}, 0, errors.New("ledger: record must be a single-line JSON object")
 	}
 	l.mu.Lock()
+	for len(l.pend) >= l.opt.MaxPending && l.err == nil && !l.closing {
+		l.requestFlush()
+		l.drained.Wait()
+	}
 	if l.err != nil {
 		defer l.mu.Unlock()
 		return Entry{}, 0, l.err
@@ -292,12 +382,14 @@ func (l *Ledger) Append(rec []byte) (Entry, int64, error) {
 	}
 
 	seq := l.seq + 1
-	sum := chainHash(seq, l.head, rec)
+	sum := entryHash(seq, l.kid, l.head, rec)
 	e := Entry{
+		V:    Version,
 		Seq:  seq,
+		Kid:  l.kid,
 		Prev: hex.EncodeToString(l.head),
 		Hash: hex.EncodeToString(sum[:]),
-		Sig:  base64.StdEncoding.EncodeToString(ed25519.Sign(l.key, sum[:])),
+		Sig:  base64.StdEncoding.EncodeToString(ed25519.Sign(l.key, entrySigMessage(sum[:]))),
 		Rec:  rec,
 	}
 	n := len(l.pend)
@@ -305,6 +397,9 @@ func (l *Ledger) Append(rec []byte) (Entry, int64, error) {
 	off := l.size
 	l.size += int64(len(l.pend) - n)
 	l.seq, l.head, l.last = seq, sum[:], &e
+	if seq == 1 {
+		l.logID = e.Hash
+	}
 	l.pending++
 	full := l.pending >= l.opt.FlushRecords
 	l.mu.Unlock()
@@ -313,12 +408,16 @@ func (l *Ledger) Append(rec []byte) (Entry, int64, error) {
 		return e, off, l.flush(false)
 	}
 	if full {
-		select {
-		case l.kick <- struct{}{}:
-		default: // a flush is already requested
-		}
+		l.requestFlush()
 	}
 	return e, off, nil
+}
+
+func (l *Ledger) requestFlush() {
+	select {
+	case l.kick <- struct{}{}:
+	default: // a flush is already requested
+	}
 }
 
 // flush writes buffered entries to the file, fsyncs without holding mu, and
@@ -332,8 +431,9 @@ func (l *Ledger) flush(forceCheckpoint bool) error {
 		defer l.mu.Unlock()
 		return l.err
 	}
-	data, last := l.pend, l.last
+	data, last, logID := l.pend, l.last, l.logID
 	l.pend, l.pending = l.spare[:0], 0
+	l.drained.Broadcast()
 	l.mu.Unlock()
 
 	if len(data) > 0 {
@@ -350,7 +450,7 @@ func (l *Ledger) flush(forceCheckpoint bool) error {
 	} else {
 		l.spare = nil // do not hold on to a buffer grown by a burst
 	}
-	return l.checkpoint(forceCheckpoint)
+	return l.checkpoint(logID, forceCheckpoint)
 }
 
 // maxSpare caps the buffer kept for reuse between flushes.
@@ -361,34 +461,41 @@ const maxSpare = 4 << 20
 func (l *Ledger) fail(op string, err error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.err = fmt.Errorf("ledger: %s failed: %w", op, err)
+	if l.err == nil {
+		l.err = fmt.Errorf("ledger: %s failed: %w", op, err)
+	}
+	l.drained.Broadcast()
 	return l.err
 }
 
 // checkpoint records the durable head. Caller holds syncMu.
-func (l *Ledger) checkpoint(force bool) error {
+func (l *Ledger) checkpoint(logID string, force bool) error {
 	d := l.durable
-	if (l.cp == nil && l.opt.CheckpointMirror == nil) || d == nil || d.Seq == l.cpSeq {
+	if (l.cp == nil && l.mirror == nil) || d == nil || d.Seq <= l.cpSeq {
 		return nil
 	}
 	if !force && d.Seq-l.cpSeq < l.opt.CheckpointRecords && time.Since(l.cpTime) < l.opt.CheckpointInterval {
 		return nil
 	}
-	b, err := json.Marshal(Checkpoint{Seq: d.Seq, Hash: d.Hash, Sig: d.Sig, Time: time.Now().UTC()})
+	c, err := newCheckpoint(l.key, l.kid, logID, d, time.Now())
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
+	b := c.appendLine(nil)
 	if l.cp != nil {
 		if _, err := l.cp.Write(b); err != nil {
-			return fmt.Errorf("ledger: checkpoint write failed: %w", err)
+			return l.fail("checkpoint write", err)
 		}
 		if err := l.cp.Sync(); err != nil {
-			return fmt.Errorf("ledger: checkpoint fsync failed: %w", err)
+			return l.fail("checkpoint fsync", err)
 		}
 	}
-	if l.opt.CheckpointMirror != nil {
-		l.opt.CheckpointMirror.Write(b) // best effort: the file copy is authoritative
+	if l.mirror != nil {
+		select {
+		case l.mirror <- b:
+		default:
+			l.mirrorDropped.Add(1)
+		}
 	}
 	l.cpSeq, l.cpTime = d.Seq, time.Now()
 	return nil
@@ -405,7 +512,7 @@ func (l *Ledger) loop() {
 		case <-t.C:
 		case <-l.kick:
 		}
-		l.flush(false) // errors are sticky and surface on the next Append
+		l.flush(false) // errors are sticky and surface through Append and Err
 	}
 }
 
@@ -419,8 +526,28 @@ func (l *Ledger) Last() (Entry, bool) {
 	return *l.last, true
 }
 
-// TornBytes reports how many bytes of an incomplete final line Open removed.
-func (l *Ledger) TornBytes() int64 { return l.torn }
+// Err returns the sticky write error, if the ledger has failed.
+func (l *Ledger) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err
+}
+
+// LogID returns the hash of entry 1, or "" for an empty log.
+func (l *Ledger) LogID() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.logID
+}
+
+// KeyID returns the ID of the signing key.
+func (l *Ledger) KeyID() string { return l.kid }
+
+// Recovery reports what Open did with an unterminated final line.
+func (l *Ledger) Recovery() Recovery { return l.rec }
+
+// MirrorDropped reports checkpoint lines the mirror could not keep up with.
+func (l *Ledger) MirrorDropped() uint64 { return l.mirrorDropped.Load() }
 
 // Close flushes, writes a final checkpoint, and closes the log.
 func (l *Ledger) Close() error {
@@ -430,11 +557,17 @@ func (l *Ledger) Close() error {
 		return ErrClosed
 	}
 	l.closing = true
+	l.drained.Broadcast()
 	l.mu.Unlock()
 
 	close(l.stop)
 	<-l.done
-	return errors.Join(l.flush(true), l.closeFiles())
+	err := l.flush(true)
+	if l.mirror != nil {
+		close(l.mirror)
+		<-l.mirrorDone
+	}
+	return errors.Join(err, l.closeFiles())
 }
 
 func (l *Ledger) closeFiles() error {

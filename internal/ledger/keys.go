@@ -3,9 +3,7 @@ package ledger
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -95,8 +93,7 @@ func readPEM(path, typ string) ([]byte, error) {
 	return blk.Bytes, nil
 }
 
-// Fingerprint is a short, stable identifier for a public key.
+// Fingerprint is a human-readable label for a public key.
 func Fingerprint(pub ed25519.PublicKey) string {
-	sum := sha256.Sum256(pub)
-	return "ed25519:" + hex.EncodeToString(sum[:8])
+	return "ed25519:" + KeyID(pub)
 }
