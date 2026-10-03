@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,31 +10,63 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// duration is a time.Duration written as a string such as "30s" in JSON and
+// on the command line.
+type duration time.Duration
+
+func (d duration) String() string { return time.Duration(d).String() }
+
+func (d *duration) Set(s string) error {
+	v, err := time.ParseDuration(s)
+	*d = duration(v)
+	return err
+}
+
+func (d duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
+
+func (d *duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return errors.New(`durations are strings such as "30s"`)
+	}
+	return d.Set(s)
+}
 
 // config holds every setting `blackbox serve` uses. It can come from a JSON
 // file, flags, or both; flags win.
 type config struct {
-	Listen      string `json:"listen"`
-	Upstream    string `json:"upstream"`
-	Log         string `json:"log"`
-	Checkpoints string `json:"checkpoints"`
-	Key         string `json:"key"`
-	Risk        string `json:"risk_map"`
-	Sync        string `json:"sync"` // "group" or "always"
-	MaxBody     int64  `json:"max_body_bytes"`
-	MirrorCPs   bool   `json:"checkpoint_stdout"`
+	Listen          string   `json:"listen"`
+	Upstream        string   `json:"upstream"`
+	Log             string   `json:"log"`
+	Checkpoints     string   `json:"checkpoints"`
+	Key             string   `json:"key"`
+	Risk            string   `json:"risk_map"`
+	Sync            string   `json:"sync"` // "group" or "always"
+	MaxBody         int64    `json:"max_body_bytes"`
+	MaxRequest      int64    `json:"max_request_bytes"`
+	MirrorCPs       bool     `json:"checkpoint_stdout"`
+	FailOpen        bool     `json:"fail_open"`
+	BodyReadTimeout duration `json:"body_read_timeout"`
+	UpstreamTimeout duration `json:"upstream_timeout"`
+	ShutdownTimeout duration `json:"shutdown_timeout"`
 }
 
 func defaultConfig() config {
 	return config{
-		Listen:      "127.0.0.1:8080",
-		Log:         "blackbox.jsonl",
-		Checkpoints: "blackbox.checkpoints.jsonl",
-		Key:         filepath.Join(keyDir(), "key.ed25519"),
-		Sync:        "group",
-		MaxBody:     32 << 20,
-		MirrorCPs:   true,
+		Listen:          "127.0.0.1:8080",
+		Log:             "blackbox.jsonl",
+		Checkpoints:     "blackbox.checkpoints.jsonl",
+		Key:             filepath.Join(keyDir(), "key.ed25519"),
+		Sync:            "group",
+		MaxBody:         32 << 20,
+		MaxRequest:      64 << 20,
+		MirrorCPs:       true,
+		BodyReadTimeout: duration(time.Minute),
+		UpstreamTimeout: duration(10 * time.Minute),
+		ShutdownTimeout: duration(30 * time.Second),
 	}
 }
 
@@ -45,6 +78,26 @@ func keyDir() string {
 	return filepath.Join(home, ".blackbox")
 }
 
+// serveFlags registers the serve flags on fs, writing into f.
+func serveFlags(fs *flag.FlagSet, f *config) *string {
+	cfgPath := fs.String("config", "", "JSON config file (flags override it)")
+	fs.StringVar(&f.Listen, "listen", "", "address to listen on (default 127.0.0.1:8080)")
+	fs.StringVar(&f.Upstream, "upstream", "", "base URL of the model server (required)")
+	fs.StringVar(&f.Log, "log", "", "audit log file (default blackbox.jsonl)")
+	fs.StringVar(&f.Checkpoints, "checkpoints", "", "checkpoint file (default blackbox.checkpoints.jsonl)")
+	fs.StringVar(&f.Key, "key", "", "private signing key (default ~/.blackbox/key.ed25519)")
+	fs.StringVar(&f.Risk, "risk", "", "risk map JSON file")
+	fs.StringVar(&f.Sync, "sync", "", `"group" (batched fsync, default) or "always" (fsync every record)`)
+	fs.Int64Var(&f.MaxBody, "max-body", 0, "bytes of each body to store (default 32 MiB); hashes always cover all bytes")
+	fs.Int64Var(&f.MaxRequest, "max-request", 0, "largest request accepted (default 64 MiB); larger ones get 413")
+	fs.BoolVar(&f.MirrorCPs, "checkpoint-stdout", true, "also print each checkpoint to stdout")
+	fs.BoolVar(&f.FailOpen, "fail-open", false, "keep forwarding traffic if the audit log fails (default: refuse with 503 and exit)")
+	fs.Var(&f.BodyReadTimeout, "body-read-timeout", "limit for reading a request body (default 1m)")
+	fs.Var(&f.UpstreamTimeout, "upstream-timeout", "limit for the model server to start responding (default 10m)")
+	fs.Var(&f.ShutdownTimeout, "shutdown-timeout", "grace period for in-flight calls at shutdown (default 30s)")
+	return cfgPath
+}
+
 // loadConfig applies defaults, then the JSON file at path (if any), then the
 // flags that were set explicitly on fs.
 func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
@@ -54,7 +107,9 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 		if err != nil {
 			return c, err
 		}
-		if err := json.Unmarshal(b, &c); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields() // a misspelled setting must not be silently ignored
+		if err := dec.Decode(&c); err != nil {
 			return c, fmt.Errorf("%s: %w", path, err)
 		}
 	}
@@ -76,8 +131,18 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 			c.Sync = flags.Sync
 		case "max-body":
 			c.MaxBody = flags.MaxBody
+		case "max-request":
+			c.MaxRequest = flags.MaxRequest
 		case "checkpoint-stdout":
 			c.MirrorCPs = flags.MirrorCPs
+		case "fail-open":
+			c.FailOpen = flags.FailOpen
+		case "body-read-timeout":
+			c.BodyReadTimeout = flags.BodyReadTimeout
+		case "upstream-timeout":
+			c.UpstreamTimeout = flags.UpstreamTimeout
+		case "shutdown-timeout":
+			c.ShutdownTimeout = flags.ShutdownTimeout
 		}
 	})
 	switch {
@@ -85,8 +150,10 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 		return c, errors.New("an upstream is required, e.g. --upstream http://127.0.0.1:9000")
 	case c.Sync != "group" && c.Sync != "always":
 		return c, errors.New(`sync must be "group" or "always"`)
-	case c.MaxBody <= 0:
-		return c, errors.New("max body bytes must be positive")
+	case c.MaxBody <= 0 || c.MaxRequest <= 0:
+		return c, errors.New("body and request limits must be positive")
+	case c.BodyReadTimeout <= 0 || c.UpstreamTimeout <= 0 || c.ShutdownTimeout <= 0:
+		return c, errors.New("timeouts must be positive")
 	}
 	return c, nil
 }

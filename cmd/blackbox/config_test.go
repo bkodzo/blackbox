@@ -4,7 +4,9 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func parse(t *testing.T, file string, args ...string) (config, error) {
@@ -53,5 +55,22 @@ func TestFingerprintCoversRiskMap(t *testing.T) {
 	c := defaultConfig()
 	if c.fingerprint([]byte(`{"a":{"risk":"low"}}`)) == c.fingerprint([]byte(`{"a":{"risk":"high"}}`)) {
 		t.Fatal("changing the risk map did not change the config fingerprint")
+	}
+}
+
+func TestRejectsUnknownConfigField(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "c.json")
+	os.WriteFile(file, []byte(`{"upstream":"http://x:1","risk":"risk.json"}`), 0o600)
+	if _, err := parse(t, file); err == nil || !strings.Contains(err.Error(), "risk") {
+		t.Fatalf("a misspelled field was accepted: %v", err)
+	}
+}
+
+func TestDurationsParseFromJSON(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "c.json")
+	os.WriteFile(file, []byte(`{"upstream":"http://x:1","shutdown_timeout":"5s"}`), 0o600)
+	c, err := parse(t, file)
+	if err != nil || time.Duration(c.ShutdownTimeout) != 5*time.Second {
+		t.Fatalf("config %+v err %v", c, err)
 	}
 }

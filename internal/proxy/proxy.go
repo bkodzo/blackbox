@@ -3,7 +3,7 @@
 //
 // The proxy does not interpret payloads. It records who sent the request,
 // the exact bytes in both directions with their SHA-256, timing, and how the
-// exchange ended, then hands a Capture to the sink. Interpretation happens
+// exchange ended, then hands an Exchange to the sink. Interpretation happens
 // later, off the request path.
 package proxy
 
@@ -22,6 +22,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -38,30 +40,40 @@ const (
 	HeaderPrincipal     = "X-Blackbox-Principal"
 )
 
-// DefaultMaxBody caps how many bytes of each body are stored. Hashes and byte
-// counts always cover the full body.
-const DefaultMaxBody = 32 << 20
+// Defaults for Config.
+const (
+	DefaultMaxBody         = 32 << 20
+	DefaultMaxRequest      = 64 << 20
+	DefaultBodyReadTimeout = time.Minute
+	DefaultUpstreamTimeout = 10 * time.Minute
+)
 
-// Capture is one finished exchange. Call has every field the proxy can know
-// without parsing payloads; Req and Resp are the stored bodies.
-type Capture struct {
-	Call      *record.LLMCall
-	Req, Resp []byte
-	SSE       bool
-}
+// ErrShutdown is the cancellation cause the gateway uses for calls still in
+// flight when its shutdown grace period ends.
+var ErrShutdown = errors.New("gateway shutting down")
 
 // Config configures a Proxy.
 type Config struct {
-	Upstream  *url.URL
-	Sink      func(Capture) // called once per exchange, from the handler goroutine
-	MaxBody   int64         // default DefaultMaxBody
-	Transport http.RoundTripper
+	Upstream *url.URL
+	// Sink receives every exchange, from the handler goroutine.
+	Sink func(record.Exchange)
+	// Gate, if set, is called before forwarding. A non-nil error refuses the
+	// request with 503, so traffic is never forwarded unrecorded.
+	Gate func() error
+
+	MaxBody         int64         // bytes of each body to store; hashes cover all bytes
+	MaxRequest      int64         // larger requests are refused with 413
+	BodyReadTimeout time.Duration // limit for reading a request body
+	UpstreamTimeout time.Duration // limit for the upstream's response headers
+	Transport       http.RoundTripper
 }
 
 // Proxy is an http.Handler that forwards every request to Config.Upstream.
 type Proxy struct {
-	cfg Config
-	rp  *httputil.ReverseProxy
+	cfg      Config
+	rp       *httputil.ReverseProxy
+	inflight sync.WaitGroup
+	aborted  atomic.Uint64
 }
 
 type ctxKey struct{}
@@ -71,6 +83,15 @@ func New(cfg Config) *Proxy {
 	if cfg.MaxBody <= 0 {
 		cfg.MaxBody = DefaultMaxBody
 	}
+	if cfg.MaxRequest <= 0 {
+		cfg.MaxRequest = DefaultMaxRequest
+	}
+	if cfg.BodyReadTimeout <= 0 {
+		cfg.BodyReadTimeout = DefaultBodyReadTimeout
+	}
+	if cfg.UpstreamTimeout <= 0 {
+		cfg.UpstreamTimeout = DefaultUpstreamTimeout
+	}
 	base := cfg.Transport
 	if base == nil {
 		// All traffic goes to one host. The default pool keeps only two idle
@@ -79,6 +100,7 @@ func New(cfg Config) *Proxy {
 		t := http.DefaultTransport.(*http.Transport).Clone()
 		t.MaxIdleConns = 256
 		t.MaxIdleConnsPerHost = 256
+		t.ResponseHeaderTimeout = cfg.UpstreamTimeout
 		base = t
 	}
 	p := &Proxy{cfg: cfg}
@@ -95,6 +117,13 @@ func New(cfg Config) *Proxy {
 	return p
 }
 
+// Wait blocks until every request being handled has finished and been
+// handed to the sink.
+func (p *Proxy) Wait() { p.inflight.Wait() }
+
+// Aborted reports calls cancelled with ErrShutdown.
+func (p *Proxy) Aborted() uint64 { return p.aborted.Load() }
+
 // exchange is the per-request state. All access happens on the handler
 // goroutine (ReverseProxy calls hooks and reads the body there).
 type exchange struct {
@@ -106,17 +135,36 @@ type exchange struct {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	received := time.Now().UTC()
-	reqBody, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "blackbox: reading request body: "+err.Error(), http.StatusBadRequest)
-		return
+	if p.cfg.Gate != nil {
+		if err := p.cfg.Gate(); err != nil {
+			http.Error(w, "blackbox: the audit log is unavailable, so the request was not forwarded: "+err.Error(),
+				http.StatusServiceUnavailable)
+			return
+		}
 	}
+	p.inflight.Add(1)
+	defer p.inflight.Done()
 
+	received := time.Now().UTC()
 	ex := &exchange{call: newCall(r, p.cfg.Upstream, received), span: randomHex(8)}
 	ex.call.Trace = trace(r.Header.Get("Traceparent"), ex.span)
-	ex.req = reqBody[:min(int64(len(reqBody)), p.cfg.MaxBody)]
+
+	reqBody, err := p.readBody(w, r)
+	ex.req = p.stored(reqBody)
 	ex.call.Request.Body = makeBody(ex.req, int64(len(reqBody)), sha256Hex(reqBody), p.cfg.MaxBody)
+	if err != nil {
+		status, class := http.StatusBadRequest, record.ErrorClientAborted
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status, class = http.StatusRequestEntityTooLarge, record.ErrorRequestTooLarge
+			ex.call.Request.Body.Truncated = true
+		}
+		ex.call.Error = &record.Error{Class: class, Message: err.Error()}
+		ex.call.Response.Status = status
+		http.Error(w, "blackbox: reading request body: "+err.Error(), status)
+		p.finish(ex, r)
+		return
+	}
 
 	out := r.WithContext(context.WithValue(r.Context(), ctxKey{}, ex))
 	out.Body = io.NopCloser(bytes.NewReader(reqBody))
@@ -126,12 +174,29 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// ReverseProxy panics with http.ErrAbortHandler when a copy fails
 		// mid-response. Record the exchange before letting it propagate.
 		v := recover()
-		p.finish(ex, r.Context().Err() != nil)
+		p.finish(ex, r)
 		if v != nil {
 			panic(v)
 		}
 	}()
 	p.rp.ServeHTTP(w, out)
+}
+
+// readBody reads the request body within the size and time limits.
+func (p *Proxy) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	rc := http.NewResponseController(w)
+	rc.SetReadDeadline(time.Now().Add(p.cfg.BodyReadTimeout)) // writers without deadlines skip the limit
+	defer rc.SetReadDeadline(time.Time{})
+	return io.ReadAll(http.MaxBytesReader(w, r.Body, p.cfg.MaxRequest))
+}
+
+// stored returns the part of b that is kept, copying it when it is a prefix
+// so the full request can be released after forwarding.
+func (p *Proxy) stored(b []byte) []byte {
+	if int64(len(b)) <= p.cfg.MaxBody {
+		return b
+	}
+	return bytes.Clone(b[:p.cfg.MaxBody])
 }
 
 func newCall(r *http.Request, upstream *url.URL, received time.Time) *record.LLMCall {
@@ -172,6 +237,11 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	c.Response.Status = resp.StatusCode
 	c.Response.ContentType = resp.Header.Get("Content-Type")
 	c.Upstream.RequestID = firstHeader(resp.Header, "X-Request-Id", "Request-Id")
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		// ReverseProxy needs the original body to splice the connection.
+		c.Response.Upgraded = true
+		return nil
+	}
 	ex.sse = strings.HasPrefix(c.Response.ContentType, "text/event-stream")
 	ex.resp = &capture{rc: resp.Body, h: sha256.New(), max: p.cfg.MaxBody}
 	resp.Body = ex.resp
@@ -180,47 +250,59 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 
 func (p *Proxy) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	ex := r.Context().Value(ctxKey{}).(*exchange)
-	class := "upstream_unreachable"
-	if r.Context().Err() != nil {
-		class = "client_aborted"
-	}
-	ex.call.Error = &record.Error{Class: class, Message: err.Error()}
+	ex.call.Error = &record.Error{Class: abortClass(r.Context(), record.ErrorUpstreamUnreachable), Message: err.Error()}
 	ex.call.Response.Status = http.StatusBadGateway
 	w.WriteHeader(http.StatusBadGateway)
 }
 
-func (p *Proxy) finish(ex *exchange, clientGone bool) {
+// abortClass explains a failure: the gateway shutting down, the client
+// leaving, or otherwise def.
+func abortClass(ctx context.Context, def string) string {
+	switch {
+	case errors.Is(context.Cause(ctx), ErrShutdown):
+		return record.ErrorGatewayShutdown
+	case ctx.Err() != nil:
+		return record.ErrorClientAborted
+	}
+	return def
+}
+
+func (p *Proxy) finish(ex *exchange, r *http.Request) {
 	c := ex.call
 	c.Timing.CompletedAt = time.Now().UTC()
-	if r := ex.resp; r != nil {
-		c.Timing.FirstByteAt = r.first
-		c.Response.Body = makeBody(r.buf.Bytes(), r.n, hex.EncodeToString(r.h.Sum(nil)), p.cfg.MaxBody)
+	if errors.Is(context.Cause(r.Context()), ErrShutdown) {
+		p.aborted.Add(1)
+	}
+	if rc := ex.resp; rc != nil {
+		c.Timing.FirstByteAt = rc.first
+		c.Response.Body = makeBody(rc.buf.Bytes(), rc.n, hex.EncodeToString(rc.h.Sum(nil)), p.cfg.MaxBody)
 		outcome := record.StreamCompleted
 		switch {
-		case r.err != nil:
-			outcome = record.StreamUpstreamError
-			if c.Error == nil {
-				c.Error = &record.Error{Class: "upstream_read", Message: r.err.Error()}
-			}
-		case !r.eof && clientGone:
+		case !rc.eof && r.Context().Err() != nil:
 			outcome = record.StreamClientAborted
 			if c.Error == nil {
-				c.Error = &record.Error{Class: "client_aborted", Message: "client disconnected before the response finished"}
+				c.Error = &record.Error{Class: abortClass(r.Context(), record.ErrorClientAborted),
+					Message: "the exchange ended before the response finished"}
+			}
+		case rc.err != nil:
+			outcome = record.StreamUpstreamError
+			if c.Error == nil {
+				c.Error = &record.Error{Class: record.ErrorUpstreamRead, Message: rc.err.Error()}
 			}
 		}
 		if ex.sse {
 			c.Response.Stream = &record.Stream{Outcome: outcome}
 		}
-		if c.Error == nil && c.Response.Status >= 400 {
-			c.Error = &record.Error{Class: "upstream_status", Message: http.StatusText(c.Response.Status)}
-		}
+	}
+	if c.Error == nil && c.Response.Status >= 400 {
+		c.Error = &record.Error{Class: record.ErrorUpstreamStatus, Message: http.StatusText(c.Response.Status)}
 	}
 	if p.cfg.Sink != nil {
 		var resp []byte
 		if ex.resp != nil {
 			resp = ex.resp.buf.Bytes()
 		}
-		p.cfg.Sink(Capture{Call: c, Req: ex.req, Resp: resp, SSE: ex.sse})
+		p.cfg.Sink(record.Exchange{Call: c, Req: ex.req, Resp: resp, SSE: ex.sse})
 	}
 }
 

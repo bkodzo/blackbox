@@ -5,81 +5,173 @@ package recorder
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
+	"sync"
 	"sync/atomic"
 
 	"github.com/bkodzo/blackbox/internal/format"
 	"github.com/bkodzo/blackbox/internal/ledger"
-	"github.com/bkodzo/blackbox/internal/proxy"
 	"github.com/bkodzo/blackbox/internal/record"
 	"github.com/bkodzo/blackbox/internal/risk"
 	"github.com/bkodzo/blackbox/internal/session"
 )
 
-// queueSize bounds captures waiting to be written. When full, Submit blocks:
-// the gateway slows down rather than dropping audit records.
-const queueSize = 1024
+// DefaultMaxQueueBytes bounds the bodies waiting to be recorded.
+const DefaultMaxQueueBytes = 256 << 20
 
-// Recorder consumes captures in arrival order.
+// Options configure a Recorder.
+type Options struct {
+	Risk risk.Map
+	// MaxQueueBytes bounds memory held by queued exchanges. When it is
+	// reached, Submit blocks: the gateway slows down rather than dropping
+	// audit records or growing without limit.
+	MaxQueueBytes int64
+	// OnFailure is called once, from the recorder goroutine, when a record
+	// cannot be written. The gateway uses it to stop forwarding traffic.
+	OnFailure func(error)
+	// Sessions, if set, is used instead of a new tracker (for example one
+	// rebuilt from the log at startup).
+	Sessions *session.Tracker
+}
+
+// Recorder consumes exchanges in arrival order.
 type Recorder struct {
 	l          *ledger.Ledger
 	instanceID string
-	risk       risk.Map
+	opt        Options
 	sessions   *session.Tracker
-	ch         chan proxy.Capture
+
+	mu     sync.Mutex
+	cond   *sync.Cond
+	queue  []record.Exchange
+	bytes  int64
+	closed bool
+
 	done       chan struct{}
 	calls      atomic.Uint64
+	unrecorded atomic.Uint64
+	failed     atomic.Pointer[error]
 }
 
 // New starts a recorder writing to l. Records carry instanceID so they can be
-// tied to the gateway_start entry of the process that wrote them. Tool calls
-// are classified with rm.
-func New(l *ledger.Ledger, instanceID string, rm risk.Map) *Recorder {
-	r := &Recorder{
-		l: l, instanceID: instanceID, risk: rm, sessions: session.New(session.DefaultIdle),
-		ch: make(chan proxy.Capture, queueSize), done: make(chan struct{}),
+// tied to the gateway_start entry of the process that wrote them.
+func New(l *ledger.Ledger, instanceID string, opt Options) *Recorder {
+	if opt.MaxQueueBytes <= 0 {
+		opt.MaxQueueBytes = DefaultMaxQueueBytes
 	}
+	if opt.Sessions == nil {
+		opt.Sessions = session.New(session.DefaultIdle)
+	}
+	r := &Recorder{l: l, instanceID: instanceID, opt: opt, sessions: opt.Sessions, done: make(chan struct{})}
+	r.cond = sync.NewCond(&r.mu)
 	go r.run()
 	return r
 }
 
-// Submit queues a capture. It is the proxy's Sink.
-func (r *Recorder) Submit(c proxy.Capture) { r.ch <- c }
+// Submit queues an exchange; it is the proxy's sink. It blocks while the
+// queue is full. After Close, the exchange is counted as unrecorded.
+func (r *Recorder) Submit(x record.Exchange) {
+	size := x.Size()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// A single exchange larger than the budget is admitted once the queue is
+	// empty, so it cannot block forever.
+	for !r.closed && r.bytes > 0 && r.bytes+size > r.opt.MaxQueueBytes {
+		r.cond.Wait()
+	}
+	if r.closed {
+		r.unrecorded.Add(1)
+		log.Printf("blackbox: AUDIT RECORD NOT WRITTEN: recorder is closed")
+		return
+	}
+	r.queue = append(r.queue, x)
+	r.bytes += size
+	r.cond.Broadcast()
+}
 
-// Close drains the queue. No Submit calls may happen after Close.
+// Close records everything already queued, then stops. Later Submit calls
+// are counted as unrecorded.
 func (r *Recorder) Close() {
-	close(r.ch)
+	r.mu.Lock()
+	r.closed = true
+	r.cond.Broadcast()
+	r.mu.Unlock()
 	<-r.done
 }
 
 // Calls returns how many calls have been written.
 func (r *Recorder) Calls() uint64 { return r.calls.Load() }
 
+// Unrecorded returns how many exchanges could not be written.
+func (r *Recorder) Unrecorded() uint64 { return r.unrecorded.Load() }
+
+// Err returns the error that stopped recording, if any.
+func (r *Recorder) Err() error {
+	if p := r.failed.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func (r *Recorder) next() (record.Exchange, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for len(r.queue) == 0 && !r.closed {
+		r.cond.Wait()
+	}
+	if len(r.queue) == 0 {
+		return record.Exchange{}, false
+	}
+	x := r.queue[0]
+	r.queue[0] = record.Exchange{}
+	r.queue = r.queue[1:]
+	r.bytes -= x.Size()
+	r.cond.Broadcast()
+	return x, true
+}
+
 func (r *Recorder) run() {
 	defer close(r.done)
-	for c := range r.ch {
-		call, parsed := Enrich(c, r.instanceID, r.risk)
-		obs := r.sessions.Observe(call, parsed)
-		b, err := json.Marshal(call)
-		if err != nil {
-			log.Printf("blackbox: encoding record: %v", err)
-			continue
+	for {
+		x, ok := r.next()
+		if !ok {
+			return
 		}
-		e, _, err := r.l.Append(b)
-		if err != nil {
+		if err := r.write(x); err != nil {
+			r.unrecorded.Add(1)
 			log.Printf("blackbox: AUDIT RECORD NOT WRITTEN: %v", err)
-			continue
+			if r.failed.CompareAndSwap(nil, &err) && r.opt.OnFailure != nil {
+				r.opt.OnFailure(err)
+			}
 		}
-		r.sessions.Commit(obs, e.Seq)
-		r.calls.Add(1)
 	}
 }
 
+func (r *Recorder) write(x record.Exchange) error {
+	if err := r.Err(); err != nil {
+		return err
+	}
+	call, parsed := Enrich(x, r.instanceID, r.opt.Risk)
+	obs := r.sessions.Observe(call, parsed)
+	b, err := json.Marshal(call)
+	if err != nil {
+		return errors.Join(errors.New("encoding record"), err)
+	}
+	e, _, err := r.l.Append(b)
+	if err != nil {
+		return err
+	}
+	r.sessions.Commit(obs, e.Seq)
+	r.calls.Add(1)
+	return nil
+}
+
 // Enrich fills the fields that require reading the payloads.
-func Enrich(c proxy.Capture, instanceID string, rm risk.Map) (*record.LLMCall, format.Parsed) {
-	call := c.Call
+func Enrich(x record.Exchange, instanceID string, rm risk.Map) (*record.LLMCall, format.Parsed) {
+	call := x.Call
 	call.InstanceID = instanceID
-	p := format.Parse(c.Req, c.Resp, c.SSE)
+	p := format.Parse(x.Req, x.Resp, x.SSE)
 	call.Format = p.Format
 
 	rq := &call.Request

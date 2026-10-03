@@ -9,7 +9,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -49,22 +51,26 @@ func runInit(args []string) int {
 func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var f config
-	cfgPath := fs.String("config", "", "JSON config file (flags override it)")
-	fs.StringVar(&f.Listen, "listen", "", "address to listen on (default 127.0.0.1:8080)")
-	fs.StringVar(&f.Upstream, "upstream", "", "base URL of the model server (required)")
-	fs.StringVar(&f.Log, "log", "", "audit log file (default blackbox.jsonl)")
-	fs.StringVar(&f.Checkpoints, "checkpoints", "", "checkpoint file (default blackbox.checkpoints.jsonl)")
-	fs.StringVar(&f.Key, "key", "", "private signing key (default ~/.blackbox/key.ed25519)")
-	fs.StringVar(&f.Risk, "risk", "", "risk map JSON file")
-	fs.StringVar(&f.Sync, "sync", "", `"group" (batched fsync, default) or "always" (fsync every record)`)
-	fs.Int64Var(&f.MaxBody, "max-body", 0, "bytes of each body to store (default 32 MiB); hashes always cover all bytes")
-	fs.BoolVar(&f.MirrorCPs, "checkpoint-stdout", true, "also print each checkpoint to stdout")
+	cfgPath := serveFlags(fs, &f)
 	fs.Parse(args)
 
 	cfg, err := loadConfig(*cfgPath, fs, &f)
 	if err != nil {
 		return fail("%v", err)
 	}
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return fail("%v", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return serve(ctx, cfg, ln, os.Stdout)
+}
+
+// serve runs the gateway on ln until ctx is done or the audit log fails.
+// Checkpoint lines are mirrored to stdout if enabled.
+func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) int {
+	defer ln.Close()
 	upstream, err := url.Parse(cfg.Upstream)
 	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
 		return fail("upstream %q is not an absolute URL", cfg.Upstream)
@@ -89,7 +95,7 @@ func runServe(args []string) int {
 
 	opt := ledger.Options{Sync: cfg.Sync == "always", CheckpointPath: cfg.Checkpoints}
 	if cfg.MirrorCPs {
-		opt.CheckpointMirror = os.Stdout
+		opt.CheckpointMirror = stdout
 	}
 	l, err := ledger.Open(cfg.Log, key, opt)
 	if err != nil {
@@ -97,6 +103,7 @@ func runServe(args []string) int {
 	}
 
 	instance := randomID()
+	recovery := l.Recovery()
 	start := record.GatewayStart{
 		Type:             record.TypeGatewayStart,
 		Time:             time.Now().UTC(),
@@ -106,10 +113,10 @@ func runServe(args []string) int {
 		KeyFingerprint:   ledger.Fingerprint(key.Public().(ed25519.PublicKey)),
 		Upstream:         upstream.String(),
 		PreviousShutdown: previousShutdown(l),
-		RepairedSeq:      l.Recovery().RepairedSeq,
-		QuarantinedBytes: l.Recovery().QuarantinedBytes,
-		QuarantineFile:   l.Recovery().QuarantineFile,
-		QuarantineSHA256: l.Recovery().QuarantineSHA256,
+		RepairedSeq:      recovery.RepairedSeq,
+		QuarantinedBytes: recovery.QuarantinedBytes,
+		QuarantineFile:   recovery.QuarantineFile,
+		QuarantineSHA256: recovery.QuarantineSHA256,
 	}
 	if err := appendJSON(l, start); err != nil {
 		l.Close()
@@ -125,49 +132,101 @@ func runServe(args []string) int {
 		log.Printf("warning: entry %d was missing its final newline; added it", start.RepairedSeq)
 	}
 
-	rec := recorder.New(l, instance, riskMap)
+	failed := make(chan error, 1)
+	rec := recorder.New(l, instance, recorder.Options{
+		Risk:      riskMap,
+		OnFailure: func(err error) { failed <- err },
+	})
+	gate := func() error {
+		if cfg.FailOpen {
+			return nil
+		}
+		return rec.Err()
+	}
+	px := proxy.New(proxy.Config{
+		Upstream:        upstream,
+		Sink:            rec.Submit,
+		Gate:            gate,
+		MaxBody:         cfg.MaxBody,
+		MaxRequest:      cfg.MaxRequest,
+		BodyReadTimeout: time.Duration(cfg.BodyReadTimeout),
+		UpstreamTimeout: time.Duration(cfg.UpstreamTimeout),
+	})
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_blackbox/health", func(w http.ResponseWriter, r *http.Request) {
 		last, _ := l.Last()
+		body := map[string]any{"ok": true, "instance_id": instance, "seq": last.Seq, "head": last.Hash}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "instance_id": instance, "seq": last.Seq, "head": last.Hash})
+		if err := rec.Err(); err != nil {
+			body["ok"], body["error"] = false, err.Error()
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		json.NewEncoder(w).Encode(body)
 	})
-	mux.Handle("/", proxy.New(proxy.Config{Upstream: upstream, Sink: rec.Submit, MaxBody: cfg.MaxBody}))
-	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	mux.Handle("/", px)
 
+	// Requests run under baseCtx, so calls still in flight when the grace
+	// period ends can be cancelled and recorded as aborted.
+	baseCtx, cancelBase := context.WithCancelCause(context.Background())
+	defer cancelBase(nil)
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	log.Printf("blackbox %s listening on http://%s, forwarding to %s", version, cfg.Listen, upstream)
+	go func() { errc <- srv.Serve(ln) }()
+	log.Printf("blackbox %s listening on http://%s, forwarding to %s", version, ln.Addr(), upstream)
 	log.Printf("log %s, key %s", cfg.Log, start.KeyFingerprint)
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	code := 0
 	select {
-	case sig := <-stop:
-		log.Printf("received %s, shutting down", sig)
+	case <-ctx.Done():
+		log.Printf("shutting down")
 	case err := <-errc:
 		log.Printf("server error: %v", err)
 		code = 1
+	case err := <-failed:
+		if cfg.FailOpen {
+			log.Printf("AUDIT LOG FAILED (%v); still forwarding because --fail-open is set", err)
+			<-ctx.Done()
+		} else {
+			log.Printf("AUDIT LOG FAILED (%v); refusing new requests and shutting down", err)
+		}
+		code = 1
 	}
 
-	// Let in-flight calls finish so they are recorded, then close the log.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Stop accepting, give in-flight calls the grace period, then cancel the
+	// rest. Every call, finished or cancelled, is recorded before the log closes.
+	sctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ShutdownTimeout))
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("shutdown: %v", err)
+	if err := srv.Shutdown(sctx); err != nil {
+		log.Printf("grace period ended with calls still in flight; cancelling them")
 	}
+	cancelBase(proxy.ErrShutdown)
+	px.Wait()
 	rec.Close()
-	stopRec := record.GatewayStop{Type: record.TypeGatewayStop, Time: time.Now().UTC(), InstanceID: instance, Calls: rec.Calls()}
-	if err := appendJSON(l, stopRec); err != nil {
-		log.Printf("writing gateway_stop: %v", err)
-		code = 1
+
+	stopRec := record.GatewayStop{
+		Type: record.TypeGatewayStop, Time: time.Now().UTC(), InstanceID: instance,
+		Calls: rec.Calls(), Unrecorded: rec.Unrecorded(), AbortedAtShutdown: px.Aborted(),
+	}
+	if rec.Err() == nil {
+		if err := appendJSON(l, stopRec); err != nil {
+			log.Printf("writing gateway_stop: %v", err)
+			code = 1
+		}
 	}
 	if err := l.Close(); err != nil {
 		log.Printf("closing log: %v", err)
 		code = 1
 	}
-	log.Printf("recorded %d calls", rec.Calls())
+	if n := l.MirrorDropped(); n > 0 {
+		log.Printf("warning: %d checkpoint lines could not be written to stdout", n)
+	}
+	log.Printf("recorded %d calls (%d unrecorded, %d cancelled at shutdown)", stopRec.Calls, stopRec.Unrecorded, stopRec.AbortedAtShutdown)
 	return code
 }
 

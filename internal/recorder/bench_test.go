@@ -45,7 +45,7 @@ func benchLedger(b *testing.B) *ledger.Ledger {
 // benchGateway starts the full gateway in front of upstream.
 func benchGateway(b *testing.B, upstream string) string {
 	l := benchLedger(b)
-	rec := New(l, "bench", nil)
+	rec := New(l, "bench", Options{})
 	u, _ := url.Parse(upstream)
 	gw := httptest.NewServer(proxy.New(proxy.Config{Upstream: u, Sink: rec.Submit}))
 	b.Cleanup(func() {
@@ -109,11 +109,11 @@ func BenchmarkThroughput(b *testing.B) {
 func BenchmarkRecordPipeline(b *testing.B) {
 	l := benchLedger(b)
 	defer l.Close()
-	rec := New(l, "bench", nil)
+	rec := New(l, "bench", Options{})
 	defer rec.Close()
 	b.SetBytes(int64(len(benchReq) + len(benchResp)))
 	for b.Loop() {
-		c := proxy.Capture{
+		c := record.Exchange{
 			Call: &record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "s"}},
 			Req:  []byte(benchReq), Resp: []byte(benchResp),
 		}

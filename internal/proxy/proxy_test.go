@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,7 +21,7 @@ import (
 // harness runs a proxy in front of upstream and collects captures.
 type harness struct {
 	srv  *httptest.Server
-	caps chan Capture
+	caps chan record.Exchange
 }
 
 func newHarness(t *testing.T, upstream http.Handler, maxBody int64) *harness {
@@ -27,20 +29,20 @@ func newHarness(t *testing.T, upstream http.Handler, maxBody int64) *harness {
 	up := httptest.NewServer(upstream)
 	t.Cleanup(up.Close)
 	u, _ := url.Parse(up.URL + "/base")
-	h := &harness{caps: make(chan Capture, 4)}
-	h.srv = httptest.NewServer(New(Config{Upstream: u, MaxBody: maxBody, Sink: func(c Capture) { h.caps <- c }}))
+	h := &harness{caps: make(chan record.Exchange, 4)}
+	h.srv = httptest.NewServer(New(Config{Upstream: u, MaxBody: maxBody, Sink: func(c record.Exchange) { h.caps <- c }}))
 	t.Cleanup(h.srv.Close)
 	return h
 }
 
-func (h *harness) capture(t *testing.T) Capture {
+func (h *harness) capture(t *testing.T) record.Exchange {
 	t.Helper()
 	select {
 	case c := <-h.caps:
 		return c
 	case <-time.After(5 * time.Second):
 		t.Fatal("no capture")
-		return Capture{}
+		return record.Exchange{}
 	}
 }
 
@@ -183,8 +185,8 @@ func TestClientAbortIsRecorded(t *testing.T) {
 
 func TestUpstreamDown(t *testing.T) {
 	u, _ := url.Parse("http://127.0.0.1:1") // nothing listens here
-	caps := make(chan Capture, 1)
-	srv := httptest.NewServer(New(Config{Upstream: u, Sink: func(c Capture) { caps <- c }}))
+	caps := make(chan record.Exchange, 1)
+	srv := httptest.NewServer(New(Config{Upstream: u, Sink: func(c record.Exchange) { caps <- c }}))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`))
@@ -243,5 +245,126 @@ func TestBinaryBodyStoredAsBase64(t *testing.T) {
 	b := h.capture(t).Call.Response.Body
 	if b.Base64 != "//4A" || b.Text != "" {
 		t.Fatalf("body %+v", b)
+	}
+}
+
+func TestRequestTooLargeIsRefusedAndRecorded(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("an oversized request reached the upstream")
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	caps := make(chan record.Exchange, 1)
+	srv := httptest.NewServer(New(Config{Upstream: u, MaxRequest: 100, MaxBody: 50, Sink: func(c record.Exchange) { caps <- c }}))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(strings.Repeat("x", 1000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	c := <-caps
+	if c.Call.Error == nil || c.Call.Error.Class != record.ErrorRequestTooLarge || len(c.Req) > 50 {
+		t.Fatalf("call %+v, stored %d bytes", c.Call.Error, len(c.Req))
+	}
+}
+
+func TestGateRefusesWhenAuditUnavailable(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("request forwarded while the audit log was down")
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	srv := httptest.NewServer(New(Config{Upstream: u, Gate: func() error { return errors.New("disk full") }}))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "disk full") {
+		t.Fatalf("status %d body %q", resp.StatusCode, body)
+	}
+}
+
+func TestProtocolUpgradePassesThrough(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		rw.Flush()
+		line, _ := rw.ReadString('\n')
+		rw.WriteString("echo: " + line)
+		rw.Flush()
+	}))
+	defer up.Close()
+	h := &harness{caps: make(chan record.Exchange, 1)}
+	u, _ := url.Parse(up.URL)
+	h.srv = httptest.NewServer(New(Config{Upstream: u, Sink: func(c record.Exchange) { h.caps <- c }}))
+	defer h.srv.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(h.srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "GET /v1/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade: %v %v", resp, err)
+	}
+	io.WriteString(conn, "hello\n")
+	if line, _ := br.ReadString('\n'); line != "echo: hello\n" {
+		t.Fatalf("after upgrade got %q", line)
+	}
+	conn.Close()
+	if c := h.capture(t).Call; !c.Response.Upgraded || c.Response.Status != 101 {
+		t.Fatalf("call %+v", c.Response)
+	}
+}
+
+func TestShutdownCancellationIsRecorded(t *testing.T) {
+	started := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: one\n\n")
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	caps := make(chan record.Exchange, 1)
+	p := New(Config{Upstream: u, Sink: func(c record.Exchange) { caps <- c }})
+
+	base, cancel := context.WithCancelCause(context.Background())
+	srv := httptest.NewUnstartedServer(p)
+	srv.Config.BaseContext = func(net.Listener) context.Context { return base }
+	srv.Start()
+	defer srv.Close()
+
+	go func() {
+		resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`))
+		if err == nil {
+			io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	<-started
+	cancel(ErrShutdown)
+	p.Wait()
+	c := (<-caps).Call
+	if c.Error == nil || c.Error.Class != record.ErrorGatewayShutdown || p.Aborted() != 1 {
+		t.Fatalf("error %+v aborted %d", c.Error, p.Aborted())
 	}
 }

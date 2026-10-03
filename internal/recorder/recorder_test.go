@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bkodzo/blackbox/internal/ledger"
 	"github.com/bkodzo/blackbox/internal/proxy"
@@ -34,7 +36,7 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := New(l, "gw-1", nil)
+	rec := New(l, "gw-1", Options{})
 	u, _ := url.Parse(up.URL)
 	srv := httptest.NewServer(proxy.New(proxy.Config{Upstream: u, Sink: rec.Submit}))
 
@@ -84,4 +86,50 @@ func TestEndToEnd(t *testing.T) {
 	if len(tc) != 2 || tc[0].Name != "read_file" || !tc[0].ValidJSON || tc[1].ValidJSON {
 		t.Fatalf("tool calls %+v", tc)
 	}
+}
+
+func TestFailureStopsRecordingAndReports(t *testing.T) {
+	dir := t.TempDir()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	l, err := ledger.Open(filepath.Join(dir, "log.jsonl"), priv, ledger.Options{Sync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures := make(chan error, 1)
+	rec := New(l, "gw", Options{OnFailure: func(err error) { failures <- err }})
+	l.Close() // every append now fails
+
+	for range 3 {
+		rec.Submit(record.Exchange{Call: &record.LLMCall{Type: record.TypeLLMCall}})
+	}
+	if err := <-failures; err == nil {
+		t.Fatal("OnFailure called with nil")
+	}
+	rec.Close()
+	if rec.Err() == nil || rec.Unrecorded() != 3 || rec.Calls() != 0 {
+		t.Fatalf("err %v unrecorded %d calls %d", rec.Err(), rec.Unrecorded(), rec.Calls())
+	}
+	rec.Submit(record.Exchange{Call: &record.LLMCall{}}) // after Close: counted, no panic
+	if rec.Unrecorded() != 4 {
+		t.Fatalf("unrecorded %d after a late submit", rec.Unrecorded())
+	}
+}
+
+func TestQueueIsBoundedByBytes(t *testing.T) {
+	r := &Recorder{opt: Options{MaxQueueBytes: 100}}
+	r.cond = sync.NewCond(&r.mu)
+	big := record.Exchange{Call: &record.LLMCall{}, Req: make([]byte, 80)}
+	r.Submit(big) // admitted: the queue was empty
+	blocked := make(chan struct{})
+	go func() {
+		r.Submit(big) // must wait: 80 + 80 > 100
+		close(blocked)
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("Submit did not block on a full queue")
+	case <-time.After(50 * time.Millisecond):
+	}
+	r.next()
+	<-blocked
 }
