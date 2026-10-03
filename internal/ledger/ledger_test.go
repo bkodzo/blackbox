@@ -410,6 +410,7 @@ func TestWriteFailureIsSticky(t *testing.T) {
 	if _, _, err := l.Append([]byte(`{"i":2}`)); err == nil {
 		t.Fatal("Append succeeded after a failed write")
 	}
+	l.Close() // release the checkpoint file so the temp dir can be removed everywhere
 }
 
 func TestMirrorReceivesCheckpoints(t *testing.T) {

@@ -18,14 +18,19 @@ func TestToolsStayInsideRoot(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.md"), []byte("hello"), 0o600)
 	os.Mkdir(filepath.Join(dir, "sub"), 0o700)
 	os.WriteFile(filepath.Join(filepath.Dir(dir), "outside.txt"), []byte("secret"), 0o600)
-	os.Symlink(filepath.Join(filepath.Dir(dir), "outside.txt"), filepath.Join(dir, "link.txt"))
+	// Creating symlinks needs extra privileges on some systems; test them where possible.
+	haveLink := os.Symlink(filepath.Join(filepath.Dir(dir), "outside.txt"), filepath.Join(dir, "link.txt")) == nil
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
 
-	if got := runTool(root, "list_dir", `{"path":"."}`); got != "a.md\nlink.txt\nsub/" {
+	want := "a.md\nsub/"
+	if haveLink {
+		want = "a.md\nlink.txt\nsub/"
+	}
+	if got := runTool(root, "list_dir", `{"path":"."}`); got != want {
 		t.Fatalf("list_dir: %q", got)
 	}
 	if got := runTool(root, "read_file", `{"path":"./a.md"}`); got != "hello" {
