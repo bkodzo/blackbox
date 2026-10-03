@@ -171,3 +171,15 @@ type Body struct {
 	Base64    string `json:"base64,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
 }
+
+// Anomaly kinds.
+const (
+	AnomalyOrphanToolResult    = "orphan_tool_result"
+	AnomalyHistoryRewritten    = "history_rewritten"
+	AnomalyHistoryTruncated    = "history_truncated"
+	AnomalyToolsetChanged      = "toolset_changed"
+	AnomalySystemPromptChanged = "system_prompt_changed"
+	AnomalyModelSubstituted    = "model_substituted"
+	AnomalyStreamAborted       = "stream_aborted"
+	AnomalyHighRiskTool        = "high_risk_tool"
+)
