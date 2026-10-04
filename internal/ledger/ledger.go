@@ -123,6 +123,9 @@ type Ledger struct {
 	done chan struct{}
 }
 
+// mirrorCloseTimeout bounds how long Close waits for the checkpoint mirror.
+const mirrorCloseTimeout = 2 * time.Second
+
 // ErrClosed is returned by Append after Close.
 var ErrClosed = errors.New("ledger: closed")
 
@@ -142,7 +145,12 @@ func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 	pub := key.Public().(ed25519.PublicKey)
 	l := &Ledger{opt: opt, key: key, kid: KeyID(pub), f: f, head: make([]byte, sha256.Size), cpTime: time.Now()}
 	l.drained = sync.NewCond(&l.mu)
-	if err := l.resume(path, pub); err != nil {
+
+	// Work out the log's state and any repair it needs, check it against the
+	// checkpoints, and only then change the file. A log that will be refused
+	// is left exactly as it was found.
+	fix, err := l.inspect(pub)
+	if err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -150,15 +158,14 @@ func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 		l.closeFiles()
 		return nil, err
 	}
+	if err := l.repair(path, fix); err != nil {
+		l.closeFiles()
+		return nil, err
+	}
 
 	if opt.CheckpointMirror != nil {
 		l.mirror, l.mirrorDone = make(chan []byte, 64), make(chan struct{})
-		go func() {
-			defer close(l.mirrorDone)
-			for b := range l.mirror {
-				opt.CheckpointMirror.Write(b)
-			}
-		}()
+		go l.mirrorLoop(opt.CheckpointMirror)
 	}
 	l.kick = make(chan struct{}, 1)
 	l.stop, l.done = make(chan struct{}), make(chan struct{})
@@ -166,45 +173,42 @@ func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 	return l, nil
 }
 
-// resume reads the end of the log, handles an unterminated tail, and restores
-// the chain state.
-func (l *Ledger) resume(path string, pub ed25519.PublicKey) error {
+// tailFix is what Open must do about bytes after the last newline.
+type tailFix struct {
+	tail     []byte // bytes after the last newline
+	end      int64  // offset of the first of them
+	complete bool   // tail is the next validly signed entry, missing only its newline
+}
+
+// inspect reads the end of the log without changing it and restores the
+// chain state as it will be after repair.
+func (l *Ledger) inspect(pub ed25519.PublicKey) (tailFix, error) {
 	line, end, size, err := readTail(l.f)
 	if err != nil {
-		return err
+		return tailFix{}, err
 	}
 	if line != nil {
 		e, err := ParseEntry(line)
 		if err != nil {
-			return fmt.Errorf("ledger: last entry is malformed (%v); run `blackbox verify`", err)
+			return tailFix{}, fmt.Errorf("ledger: last entry is malformed (%v); run `blackbox verify`", err)
 		}
 		head, reason := e.check(pub, l.kid)
 		if reason != "" {
-			return fmt.Errorf("ledger: last entry (seq %d) %s; run `blackbox verify`", e.Seq, reason)
+			return tailFix{}, fmt.Errorf("ledger: last entry (seq %d) %s; run `blackbox verify`", e.Seq, reason)
 		}
 		l.seq, l.head, l.last, l.durable = e.Seq, head, &e, &e
 	}
 
+	var fix tailFix
 	if end < size {
-		tail := make([]byte, size-end)
-		if _, err := l.f.ReadAt(tail, end); err != nil {
-			return err
+		fix.tail, fix.end = make([]byte, size-end), end
+		if _, err := l.f.ReadAt(fix.tail, end); err != nil {
+			return tailFix{}, err
 		}
-		if e, head, ok := l.continues(tail, pub); ok {
-			if _, err := l.f.Write([]byte{'\n'}); err != nil {
-				return err
-			}
+		if e, head, ok := l.continues(fix.tail, pub); ok {
+			fix.complete = true
 			l.seq, l.head, l.last, l.durable = e.Seq, head, &e, &e
-			l.rec.RepairedSeq = e.Seq
-		} else if err := l.quarantine(path, tail, end); err != nil {
-			return err
 		}
-		if err := l.f.Sync(); err != nil {
-			return err
-		}
-	}
-	if l.size, err = l.f.Seek(0, io.SeekEnd); err != nil {
-		return err
 	}
 
 	switch {
@@ -213,18 +217,60 @@ func (l *Ledger) resume(path string, pub ed25519.PublicKey) error {
 	case l.seq > 1:
 		first, err := readFirstLine(l.f)
 		if err != nil {
-			return err
+			return tailFix{}, err
 		}
 		e, err := ParseEntry(first)
 		if err != nil {
-			return fmt.Errorf("ledger: first entry is malformed (%v); run `blackbox verify`", err)
+			return tailFix{}, fmt.Errorf("ledger: first entry is malformed (%v); run `blackbox verify`", err)
 		}
 		if _, reason := e.check(pub, l.kid); reason != "" || e.Seq != 1 {
-			return fmt.Errorf("ledger: first entry is invalid; run `blackbox verify`")
+			return tailFix{}, fmt.Errorf("ledger: first entry is invalid; run `blackbox verify`")
 		}
 		l.logID = e.Hash
 	}
-	return nil
+	return fix, nil
+}
+
+// repair applies fix: it adds the missing newline to a complete final entry,
+// or moves an incomplete one to a quarantine file.
+func (l *Ledger) repair(path string, fix tailFix) error {
+	switch {
+	case fix.tail == nil:
+	case fix.complete:
+		if _, err := l.f.Write([]byte{'\n'}); err != nil {
+			return err
+		}
+		l.rec.RepairedSeq = l.seq
+	default:
+		if err := l.quarantine(path, fix.tail, fix.end); err != nil {
+			return err
+		}
+	}
+	if fix.tail != nil {
+		if err := l.f.Sync(); err != nil {
+			return err
+		}
+	}
+	var err error
+	l.size, err = l.f.Seek(0, io.SeekEnd)
+	return err
+}
+
+// mirrorLoop copies checkpoint lines to w. After a write error (a closed pipe,
+// for example) it stops writing and counts the remaining lines as dropped.
+func (l *Ledger) mirrorLoop(w io.Writer) {
+	defer close(l.mirrorDone)
+	broken := false
+	for b := range l.mirror {
+		if broken {
+			l.mirrorDropped.Add(1)
+			continue
+		}
+		if _, err := w.Write(b); err != nil {
+			broken = true
+			l.mirrorDropped.Add(1)
+		}
+	}
 }
 
 // continues reports whether tail is the complete, validly signed next entry.
@@ -517,6 +563,9 @@ func (l *Ledger) loop() {
 	}
 }
 
+// Sync makes every entry appended so far durable before returning.
+func (l *Ledger) Sync() error { return l.flush(false) }
+
 // Last returns the most recent entry, if any.
 func (l *Ledger) Last() (Entry, bool) {
 	l.mu.Lock()
@@ -566,7 +615,13 @@ func (l *Ledger) Close() error {
 	err := l.flush(true)
 	if l.mirror != nil {
 		close(l.mirror)
-		<-l.mirrorDone
+		select {
+		case <-l.mirrorDone:
+		case <-time.After(mirrorCloseTimeout):
+			// The mirror's reader has stalled. Do not let it hold up shutdown;
+			// the checkpoint file has every line.
+			l.mirrorDropped.Add(uint64(len(l.mirror)) + 1)
+		}
 	}
 	return errors.Join(err, l.closeFiles())
 }

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fixture struct {
@@ -522,5 +523,82 @@ func BenchmarkVerify(b *testing.B) {
 		if _, err := Verify(bytes.NewReader(data), f.pub, nil, nil); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestUppercaseHexCannotFakeARewrite(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, 3)
+	b, _ := os.ReadFile(f.cps)
+	line := string(b)
+	i := strings.Index(line, `"hash":"`) + len(`"hash":"`)
+	upper := line[:i] + strings.ToUpper(line[i:i+64]) + line[i+64:]
+	os.WriteFile(f.cps, []byte(line+upper), 0o600)
+	if _, _, err := ReadCheckpoints(f.cps); err == nil {
+		t.Fatal("an uppercase checkpoint hash was accepted")
+	}
+	if _, err := ParseEntry([]byte(strings.Replace(strings.TrimSuffix(f.lines(t)[1], "\n"), `"kid":"`, `"kid":"A`, 1))); err == nil {
+		t.Fatal("a malformed key ID was accepted")
+	}
+}
+
+func TestRefusedOpenLeavesTheLogUntouched(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, 5)
+	lines := f.lines(t)
+	torn := strings.Join(lines[:2], "") + lines[2][:20] // cut mid-line, below the checkpoint
+	os.WriteFile(f.log, []byte(torn), 0o600)
+	if _, err := Open(f.log, f.priv, Options{CheckpointPath: f.cps}); err == nil {
+		t.Fatal("opened a log below its checkpoint")
+	}
+	after, _ := os.ReadFile(f.log)
+	if string(after) != torn {
+		t.Fatal("a refused Open changed the log")
+	}
+	if m, _ := filepath.Glob(f.log + ".torn-*"); len(m) != 0 {
+		t.Fatalf("a refused Open created %v", m)
+	}
+}
+
+// stallWriter blocks forever, like a pipe nobody reads.
+type stallWriter struct{}
+
+func (stallWriter) Write([]byte) (int, error) { select {} }
+
+type brokenWriter struct{}
+
+func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+func TestStalledMirrorDoesNotBlockClose(t *testing.T) {
+	f := newFixture(t)
+	l := f.open(t, Options{CheckpointMirror: stallWriter{}})
+	l.Append([]byte(`{"i":1}`))
+	done := make(chan error, 1)
+	go func() { done <- l.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on a stalled mirror")
+	}
+	if l.MirrorDropped() == 0 {
+		t.Fatal("dropped checkpoint lines were not counted")
+	}
+}
+
+func TestBrokenMirrorIsCountedNotFatal(t *testing.T) {
+	f := newFixture(t)
+	l := f.open(t, Options{CheckpointMirror: brokenWriter{}})
+	l.Append([]byte(`{"i":1}`))
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if l.MirrorDropped() != 1 {
+		t.Fatalf("dropped %d", l.MirrorDropped())
+	}
+	if _, err := f.verify(t); err != nil {
+		t.Fatal(err)
 	}
 }

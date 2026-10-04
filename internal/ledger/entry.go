@@ -114,7 +114,30 @@ func ParseEntry(line []byte) (Entry, error) {
 	if want := e.appendLine(nil); !bytes.Equal(want[:len(want)-1], line) {
 		return Entry{}, errNotCanonical
 	}
+	if !lowerHex(e.Kid, 16) || !lowerHex(e.Prev, 64) || !lowerHex(e.Hash, 64) || !strictBase64(e.Sig, ed25519.SignatureSize) || e.Seq == 0 {
+		return Entry{}, errNotCanonical
+	}
 	return e, nil
+}
+
+// lowerHex reports whether s is exactly n lowercase hex digits.
+func lowerHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// strictBase64 reports whether s is the standard, padded base64 encoding of
+// exactly n bytes, with no other encoding of the same bytes accepted.
+func strictBase64(s string, n int) bool {
+	b, err := base64.StdEncoding.Strict().DecodeString(s)
+	return err == nil && len(b) == n && base64.StdEncoding.EncodeToString(b) == s
 }
 
 // check recomputes the entry's hash from its own fields and verifies its
@@ -209,6 +232,11 @@ func parseCheckpoint(line []byte) (Checkpoint, error) {
 		return c, fmt.Errorf("unsupported checkpoint version %d", c.V)
 	}
 	if want := c.appendLine(nil); !bytes.Equal(want[:len(want)-1], line) {
+		return c, errors.New("checkpoint is not in canonical form")
+	}
+	ts, err := time.Parse(time.RFC3339Nano, c.Time)
+	if err != nil || ts.UTC().Format(time.RFC3339Nano) != c.Time || c.Seq == 0 ||
+		!lowerHex(c.Log, 64) || !lowerHex(c.Hash, 64) || !lowerHex(c.Kid, 16) || !strictBase64(c.Sig, ed25519.SignatureSize) {
 		return c, errors.New("checkpoint is not in canonical form")
 	}
 	return c, nil
