@@ -91,7 +91,7 @@ func runSessions(args []string) int {
 	fmt.Fprintln(tw, "SESSION\tAGENT\tCALLS\tTOOL CALLS\tANOMALIES\tTOKENS IN\tTOKENS OUT\tSTARTED\tDURATION")
 	for _, s := range list {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n",
-			s.id, orDash(s.agent), s.calls, s.tools, s.anomalies, s.tokensIn, s.tokOut,
+			safe(s.id), orDash(s.agent), s.calls, s.tools, s.anomalies, s.tokensIn, s.tokOut,
 			s.first.Local().Format("2006-01-02 15:04:05"), s.last.Sub(s.first).Round(time.Millisecond))
 	}
 	tw.Flush()
