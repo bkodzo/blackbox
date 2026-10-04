@@ -10,6 +10,8 @@ builds:
     goarch: [amd64, arm64]
     flags:
       - -trimpath
+    # Fixed file times make builds reproducible from the same commit.
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w -X main.version={{.Version}}
 
