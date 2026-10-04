@@ -247,20 +247,23 @@ a conversation's length; storing messages once by hash is planned.
 
 ## Performance
 
-Measured on an Apple M3 with the benchmarks in `internal/recorder` and
-`internal/ledger`, with conversation checks running on every call:
+The request path only copies and hashes bytes; parsing, conversation checks,
+signing, and disk writes happen on the recorder goroutine. The benchmarks in
+`internal/recorder` and `internal/ledger` measure added latency per call,
+throughput through the gateway, the per-call recording cost, ledger appends
+with and without per-entry fsync, and verification speed:
 
-| Measure | Result |
-|---|---|
-| Added latency per call | about 0.17 ms |
-| Throughput through the gateway | about 6,500 calls/s |
-| Recording pipeline per call (off the request path) | about 100 us |
-| Ledger append, including every fsync | about 18 us (55,000 entries/s) |
-| `--sync always` append | about 5 ms |
-| Verification | about 230 MB/s |
+```
+go test -run '^$' -bench . ./internal/recorder ./internal/ledger
+```
 
-Model calls take hundreds of milliseconds or more, so the gateway adds well
-under one percent to an agent's run time.
+On one development laptop the gateway added roughly 0.2 ms per call over a
+loopback connection, recording cost roughly 0.1 ms per call off the request
+path, and verification ran at a few hundred MB/s. Treat these as indicative:
+they come from a single machine, a synthetic upstream, and loopback
+networking, and real numbers depend on hardware, disk, and payload size.
+Model calls usually take hundreds of milliseconds or more, so the overhead is
+small relative to an agent's run time.
 
 ## Not yet built
 
