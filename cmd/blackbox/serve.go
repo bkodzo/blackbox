@@ -63,6 +63,9 @@ func runServe(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
+	// A closed stdout must not kill the gateway: checkpoint lines written
+	// there then fail with an error, which the ledger counts as dropped.
+	signal.Ignore(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serve(ctx, cfg, ln, os.Stdout)
@@ -83,18 +86,26 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 	if err != nil {
 		return fail("%v", err)
 	}
+	// Read the risk map once, so the recorded fingerprint matches the rules in use.
 	var riskBytes []byte
+	riskMap := risk.Map{}
 	if cfg.Risk != "" {
 		if riskBytes, err = os.ReadFile(cfg.Risk); err != nil {
 			return fail("%v", err)
 		}
-	}
-	riskMap, err := risk.Load(cfg.Risk)
-	if err != nil {
-		return fail("%v", err)
+		if riskMap, err = risk.Parse(riskBytes, cfg.Risk); err != nil {
+			return fail("%v", err)
+		}
 	}
 
-	opt := ledger.Options{Sync: cfg.Sync == "always", CheckpointPath: cfg.Checkpoints}
+	failed := make(chan error, 2)
+	onFailure := func(err error) {
+		select {
+		case failed <- err:
+		default:
+		}
+	}
+	opt := ledger.Options{Sync: cfg.Sync == "always", CheckpointPath: cfg.Checkpoints, OnFailure: onFailure}
 	if cfg.MirrorCPs {
 		opt.CheckpointMirror = stdout
 	}
@@ -119,7 +130,13 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		QuarantineFile:   recovery.QuarantineFile,
 		QuarantineSHA256: recovery.QuarantineSHA256,
 	}
+	// gateway_start, with any recovery it describes, is on disk before the
+	// first request is served.
 	if err := appendJSON(l, start); err != nil {
+		l.Close()
+		return fail("writing gateway_start: %v", err)
+	}
+	if err := l.Sync(); err != nil {
 		l.Close()
 		return fail("writing gateway_start: %v", err)
 	}
@@ -140,17 +157,17 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		log.Printf("restored %d recent calls for conversation checks", replayed)
 	}
 
-	failed := make(chan error, 1)
 	rec := recorder.New(l, instance, recorder.Options{
 		Risk:      riskMap,
 		Sessions:  sessions,
-		OnFailure: func(err error) { failed <- err },
+		OnFailure: onFailure,
 	})
+	auditErr := func() error { return errors.Join(l.Err(), rec.Err()) }
 	gate := func() error {
 		if cfg.FailOpen {
 			return nil
 		}
-		return rec.Err()
+		return auditErr()
 	}
 	px := proxy.New(proxy.Config{
 		Upstream:        upstream,
@@ -167,8 +184,8 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		last, _ := l.Last()
 		body := map[string]any{"ok": true, "instance_id": instance, "seq": last.Seq, "head": last.Hash}
 		w.Header().Set("Content-Type", "application/json")
-		if err := rec.Err(); err != nil {
-			body["ok"], body["error"] = false, err.Error()
+		if auditErr() != nil {
+			body["ok"], body["error"] = false, "audit log unavailable"
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		json.NewEncoder(w).Encode(body)
@@ -198,13 +215,20 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		log.Printf("server error: %v", err)
 		code = 1
 	case err := <-failed:
+		code = 1
 		if cfg.FailOpen {
 			log.Printf("AUDIT LOG FAILED (%v); still forwarding because --fail-open is set", err)
-			<-ctx.Done()
+			select {
+			case <-ctx.Done():
+			case err := <-errc:
+				log.Printf("server error: %v", err)
+			}
 		} else {
-			log.Printf("AUDIT LOG FAILED (%v); refusing new requests and shutting down", err)
+			// Nothing more can be recorded, so calls in flight must not keep
+			// streaming: cancel them now instead of waiting out the grace period.
+			log.Printf("AUDIT LOG FAILED (%v); cancelling calls in flight and shutting down", err)
+			cancelBase(proxy.ErrShutdown)
 		}
-		code = 1
 	}
 
 	// Stop accepting, give in-flight calls the grace period, then cancel the
@@ -222,7 +246,7 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		Type: record.TypeGatewayStop, Time: time.Now().UTC(), InstanceID: instance,
 		Calls: rec.Calls(), Unrecorded: rec.Unrecorded(), AbortedAtShutdown: px.Aborted(),
 	}
-	if rec.Err() == nil {
+	if auditErr() == nil {
 		if err := appendJSON(l, stopRec); err != nil {
 			log.Printf("writing gateway_stop: %v", err)
 			code = 1

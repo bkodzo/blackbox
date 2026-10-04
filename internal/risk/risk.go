@@ -36,6 +36,12 @@ func Load(path string) (Map, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(b, path)
+}
+
+// Parse decodes a JSON risk map; name is used in error messages.
+func Parse(b []byte, name string) (Map, error) {
+	path := name
 	var m Map
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields() // a misspelled field must not silently drop a rule
