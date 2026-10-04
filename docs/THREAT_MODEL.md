@@ -113,4 +113,8 @@ rebuilt from the log after a restart. These are flags for review, not blocks.
 - **Confidentiality.** The log contains full prompts and responses in plain
   text. It is created with owner-only permissions but is not encrypted.
 - **Detection heuristics.** Tool calls written as text are found by pattern and
-  can be missed (for example non-JSON formats) or over-reported.
+  can be missed (non-JSON formats, calls with no arguments, or calls to tools
+  that were not offered and are not in the risk map, which are only counted) or
+  over-reported. A scan cut short by its limits is flagged.
+- **Agents that never echo.** An agent that drops the model's reply from its
+  history entirely is flagged on every turn; this is deliberate.

@@ -187,9 +187,17 @@ Anything that matches neither shape is recorded as `unknown`, with its full
 bytes and hashes; only the convenience fields stay empty.
 
 The parser also scans reply text for tool calls written as text, a common
-failure of small models: a JSON object with a tool-like name and arguments
-that is not a JSON Schema (which would mean the model is describing a tool, not
-calling it). The work is bounded to 64 KB of text and 64 candidates per reply.
+failure of small models: a JSON object with a tool-like name and arguments,
+at the top level or nested inside other JSON, that is not a JSON Schema (which
+would mean the model is describing a tool, not calling it). The work is bounded
+to 64 KB of text and 4 MB of decoding per reply; a scan cut short by either
+limit is flagged (`text_scan_partial`), so hostile text cannot hide a call
+silently. When tools were offered, only calls naming an offered tool or one in
+the risk map count; the rest are counted in `ignored_text_calls`.
+
+Canonical hashing compares numbers by value in linear time, so `1.0` equals
+`1` and a number like `1e1000000` stays short. JSON that decoding would
+silently merge, such as duplicate keys or invalid UTF-8, is hashed as sent.
 
 ## Conversation checks
 
@@ -223,7 +231,8 @@ For each call the tracker checks that:
   (`duplicate_tool_result`), and is linked to the entry where the call was
   made; results with no earlier turn to check against are flagged as
   `unverifiable_tool_result` rather than trusted;
-- the tools and leading system prompt have not changed.
+- the tools and leading system prompt have not changed, and no system or
+  developer message was added mid-conversation.
 
 Servers that return tool calls without IDs are handled by matching the agent's
 echoed calls by name and arguments and adopting the IDs the agent assigned. An
@@ -231,8 +240,11 @@ agent that runs a call the model only wrote as text is allowed when the model
 made no real calls, and flagged as `text_tool_call_executed`.
 
 Tracked state is bounded: at most 32 branches per conversation opening and
-10,000 conversations in total, evicting the least recently used. Numbers in
-arguments are compared by value, so `1.0` and `1` are equal.
+10,000 conversations in total, evicting the least recently used. A call that
+gets no reply leaves the conversation unchanged, so a retry is checked against
+the last turn that succeeded. Conversations without a session ID that share
+only their opening, such as different tasks started with the same context
+message, are treated as unrelated.
 
 Single-call checks cover model substitution (a served name must equal the
 requested one or add only a version suffix), aborted streams, high-risk tools,

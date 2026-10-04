@@ -99,6 +99,8 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `response.tool_calls[]` | `id`, `name`, `arguments`, `arguments_valid_json`, `in_text`, `risk`, `category` |
 | `response.usage` | `input`, `output`, and `total` tokens |
 | `response.stream` | For streamed responses: `chunks` and `outcome` (`completed`, `client_aborted`, `upstream_error`) |
+| `response.ignored_text_calls` | Tool-call-shaped JSON in the reply text that was not counted as a call, because it named a tool that was not offered and is not in the risk map |
+| `response.text_scan_partial` | True if the reply text was too long or complex to search completely for tool calls written as text |
 | `response.upgraded` | True if the server switched protocols (status 101); traffic after the switch is not recorded |
 | `response.body` | See Body |
 
@@ -143,6 +145,7 @@ All times are RFC 3339 in UTC.
 | `unverifiable_tool_result` | A tool result arrived with no earlier turn to check it against |
 | `duplicate_tool_result` | Another result arrived for a tool call that was already answered |
 | `text_tool_call_executed` | The agent ran a call the model only wrote as text |
+| `text_scan_partial` | The reply text could not be searched completely for tool calls written as text |
 | `history_rewritten` | An earlier message, or the model's tool calls or reply text, changed or was left out; or messages were attributed to the model that it never sent |
 | `history_truncated` | Older messages were dropped since the previous turn |
 | `toolset_changed` | The tools offered changed since the previous turn |
