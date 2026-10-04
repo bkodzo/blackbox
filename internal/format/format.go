@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"strings"
 )
 
@@ -134,7 +135,7 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 	sys := sha256.New()
 	sysSeen := false
 	if len(raw.System) > 0 {
-		sys.Write(canonical(raw.System))
+		sys.Write(canonicalMessage(raw.System))
 		sysSeen = true
 	}
 
@@ -143,7 +144,7 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 	for _, m := range raw.Messages {
 		var rm rawMessage
 		json.Unmarshal(m, &rm)
-		c := canonical(m)
+		c := canonicalMessage(m)
 		msg := Message{Role: rm.Role, SHA256: hexSum(c)}
 		if text := strings.TrimSpace(textOf(rm.Content)); text != "" {
 			msg.TextSHA256 = hexSum([]byte(text))
@@ -194,7 +195,7 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 				name = td.Name
 			}
 			r.Tools = append(r.Tools, name)
-			all.Write(canonical(t))
+			all.Write(canonicalMessage(t))
 		}
 		r.ToolsSHA256 = hex.EncodeToString(all.Sum(nil))
 	}
@@ -336,6 +337,11 @@ func parseStream(b []byte, r *Response) string {
 	// Tool calls arrive in pieces keyed by index; arguments are concatenated.
 	calls := map[int]*ToolCall{}
 	var order []int
+	// Chat deltas are keyed by index, but some servers send every call at
+	// index 0 (or omit it). A new ID at an index that already has a different
+	// ID starts a new call.
+	slot := map[int]int{}
+	nextSlot := 0
 	call := func(i int) *ToolCall {
 		c, ok := calls[i]
 		if !ok {
@@ -377,7 +383,13 @@ func parseStream(b []byte, r *Response) string {
 				}
 				text.WriteString(c.Delta.Content)
 				for _, d := range c.Delta.ToolCalls {
-					tc := call(d.Index)
+					key, ok := slot[d.Index]
+					if !ok || (d.ID != "" && calls[key].ID != "" && calls[key].ID != d.ID) {
+						key = nextSlot
+						nextSlot++
+						slot[d.Index] = key
+					}
+					tc := call(key)
 					if d.ID != "" {
 						tc.ID = d.ID
 					}
@@ -429,27 +441,89 @@ func parseStream(b []byte, r *Response) string {
 	return format
 }
 
-// annotationKeys are fields clients attach to messages for transport
-// purposes, such as cache markers that move from turn to turn. They do not
-// change what was said, so they are left out of message hashes.
+// annotationKeys are fields clients attach to messages, content blocks, and
+// tool definitions for transport purposes, such as cache markers that move
+// from turn to turn. They do not change what was said, so they are left out
+// of those hashes. They are never removed from tool arguments or results.
 var annotationKeys = []string{"cache_control"}
 
-// canonical re-encodes JSON with sorted keys, no insignificant space, and no
-// annotation fields, so equal content hashes equally regardless of how a
+// canonical re-encodes JSON with sorted keys, no insignificant space, and
+// numbers in one form, so equal content hashes equally regardless of how a
 // client serialized it.
-func canonical(b []byte) []byte {
+func canonical(b []byte) []byte { return canonicalize(b, nil) }
+
+// canonicalMessage is canonical for a message, system prompt, or tool
+// definition: annotation fields on the object itself and on its content
+// blocks are dropped.
+func canonicalMessage(b []byte) []byte { return canonicalize(b, stripAnnotations) }
+
+func canonicalize(b []byte, strip func(any)) []byte {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	if dec.Decode(&v) != nil {
 		return b
 	}
-	stripAnnotations(v)
-	out, err := json.Marshal(v)
+	if strip != nil {
+		strip(v)
+	}
+	out, err := json.Marshal(normalizeNumbers(v))
 	if err != nil {
 		return b
 	}
 	return out
+}
+
+// stripAnnotations removes annotation keys from an object (or each object
+// in an array, such as a list of system blocks) and from the blocks in its
+// content array. It does not descend further.
+func stripAnnotations(v any) {
+	switch v := v.(type) {
+	case []any:
+		for _, x := range v {
+			if m, ok := x.(map[string]any); ok {
+				dropKeys(m)
+			}
+		}
+	case map[string]any:
+		dropKeys(v)
+		if content, ok := v["content"].([]any); ok {
+			for _, x := range content {
+				if m, ok := x.(map[string]any); ok {
+					dropKeys(m)
+				}
+			}
+		}
+	}
+}
+
+func dropKeys(m map[string]any) {
+	for _, k := range annotationKeys {
+		delete(m, k)
+	}
+}
+
+// normalizeNumbers rewrites every number in its exact rational form, so 1,
+// 1.0, and 1e0 compare equal while distinct values stay distinct.
+func normalizeNumbers(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, x := range v {
+			v[k] = normalizeNumbers(x)
+		}
+	case []any:
+		for i, x := range v {
+			v[i] = normalizeNumbers(x)
+		}
+	case json.Number:
+		if len(v) > 64 { // do not expand huge exponents
+			return v
+		}
+		if r, ok := new(big.Rat).SetString(string(v)); ok {
+			return json.Number(r.RatString())
+		}
+	}
+	return v
 }
 
 func compact(b []byte) []byte {
@@ -466,20 +540,4 @@ func compact(b []byte) []byte {
 func hexSum(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
-}
-
-func stripAnnotations(v any) {
-	switch v := v.(type) {
-	case map[string]any:
-		for _, k := range annotationKeys {
-			delete(v, k)
-		}
-		for _, x := range v {
-			stripAnnotations(x)
-		}
-	case []any:
-		for _, x := range v {
-			stripAnnotations(x)
-		}
-	}
 }

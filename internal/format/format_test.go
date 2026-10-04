@@ -243,3 +243,51 @@ func TestSchemaDescriptionIsNotATextToolCall(t *testing.T) {
 		t.Fatalf("schema description reported as a call: %+v", got)
 	}
 }
+
+func TestNumbersCompareByValue(t *testing.T) {
+	if CanonicalArgs(`{"limit":1.0}`) != CanonicalArgs(`{"limit":1}`) || CanonicalArgs(`{"n":1e2}`) != CanonicalArgs(`{"n":100}`) {
+		t.Fatal("equal numbers compared unequal")
+	}
+	if CanonicalArgs(`{"n":0.1}`) == CanonicalArgs(`{"n":0.10000001}`) {
+		t.Fatal("different numbers compared equal")
+	}
+}
+
+func TestAnnotationsInsideArgumentsAreKept(t *testing.T) {
+	if CanonicalArgs(`{"cache_control":"no-store"}`) == CanonicalArgs(`{"cache_control":"public"}`) {
+		t.Fatal("a cache_control argument was stripped")
+	}
+	a := Parse([]byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"set_header","arguments":"{\"cache_control\":\"no-store\"}"}}]}]}`), nil, false)
+	b := Parse([]byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"set_header","arguments":"{\"cache_control\":\"public\"}"}}]}]}`), nil, false)
+	if a.Request.Messages[0].SHA256 == b.Request.Messages[0].SHA256 {
+		t.Fatal("changing a tool argument named cache_control did not change the message hash")
+	}
+}
+
+func TestStreamedCallsWithoutIndexStaySeparate(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"list_dir","arguments":"{}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"id":"b","function":{"name":"read_file","arguments":"{}"}}]}}]}`,
+	}, "\n\n")
+	p := Parse(nil, []byte(stream), true)
+	want := []ToolCall{{"a", "list_dir", "{}"}, {"b", "read_file", "{}"}}
+	if !reflect.DeepEqual(p.Response.ToolCalls, want) {
+		t.Fatalf("calls %+v", p.Response.ToolCalls)
+	}
+}
+
+func TestOtherTextCallShapes(t *testing.T) {
+	got := findTextToolCalls(`{"action":"run_shell","action_input":"ls"} and {"tool":"read_file","tool_input":{"path":"a"}}`)
+	want := []ToolCall{{Name: "run_shell", Arguments: "ls"}, {Name: "read_file", Arguments: `{"path":"a"}`}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestCodeBeforeACallDoesNotHideIt(t *testing.T) {
+	code := strings.Repeat("{x} ", 200)
+	got := findTextToolCalls(code + `{"name":"rm","parameters":{"path":"/"}}`)
+	if len(got) != 1 || got[0].Name != "rm" {
+		t.Fatalf("got %+v", got)
+	}
+}
