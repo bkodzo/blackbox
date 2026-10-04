@@ -28,6 +28,8 @@ First release.
   arguments, reply text, and replies attributed to the model that it never
   sent), changed tools or system prompt, model substitution, aborted streams,
   high-risk tools, and tool calls written as text or run from text.
+- Extraction of the model's reasoning (reasoning fields, thinking blocks, or
+  inline think tags), shown by `blackbox show`.
 - Risk map for classifying tools by level and category.
 - `blackbox init`, `serve`, `sessions`, and `show` commands, with escaping of
   terminal control characters in recorded text.

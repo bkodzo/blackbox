@@ -99,6 +99,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `response.tool_calls[]` | `id`, `name`, `arguments`, `arguments_valid_json`, `in_text`, `risk`, `category` |
 | `response.usage` | `input`, `output`, and `total` tokens |
 | `response.stream` | For streamed responses: `chunks` and `outcome` (`completed`, `client_aborted`, `upstream_error`) |
+| `response.reasoning` | When the server returned the model's reasoning: `preview` (the first 500 characters), `chars`, `sha256` of the full text, and `redacted_blocks` returned only in encrypted form. The full text is in the response body |
 | `response.ignored_text_calls` | Tool-call-shaped JSON in the reply text that was not counted as a call, because it named a tool that was not offered and is not in the risk map |
 | `response.text_scan_partial` | True if the reply text was too long or complex to search completely for tool calls written as text |
 | `response.upgraded` | True if the server switched protocols (status 101); traffic after the switch is not recorded |

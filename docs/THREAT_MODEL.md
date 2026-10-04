@@ -110,8 +110,11 @@ rebuilt from the log after a restart. These are flags for review, not blocks.
 - **Few-shot examples.** A conversation the gateway has never seen may open with
   example model replies written by the agent. These are not flagged, since they
   cannot be told apart from a conversation that began before the gateway.
-- **Confidentiality.** The log contains full prompts and responses in plain
-  text. It is created with owner-only permissions but is not encrypted.
+- **Confidentiality.** The log contains full prompts, responses, and any model
+  reasoning in plain text. It is created with owner-only permissions but is not
+  encrypted, and there is no redaction yet.
+- **Hidden reasoning.** Reasoning a server does not return, or returns only in
+  encrypted form, cannot be recorded or reviewed.
 - **Detection heuristics.** Tool calls written as text are found by pattern and
   can be missed (non-JSON formats, calls with no arguments, or calls to tools
   that were not offered and are not in the risk map, which are only counted) or

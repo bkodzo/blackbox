@@ -195,6 +195,16 @@ limit is flagged (`text_scan_partial`), so hostile text cannot hide a call
 silently. When tools were offered, only calls naming an offered tool or one in
 the risk map count; the rest are counted in `ignored_text_calls`.
 
+The parser also extracts the model's reasoning when the server returns it: a
+separate reasoning field in chat-shaped responses, thinking blocks in
+block-shaped ones (streamed or not), or text the model wrote between think
+tags. The record keeps a preview, the length, and a hash; the full text stays
+in the response body, so it is not stored twice. Reasoning a server keeps
+private, or returns only encrypted, cannot be recorded, since the gateway sees
+only what crosses the wire; encrypted blocks are counted. Inline reasoning is
+left out of reply text comparisons and of the text call search, so a call the
+model only considered is not reported as an attempt.
+
 Canonical hashing compares numbers by value in linear time, so `1.0` equals
 `1` and a number like `1e1000000` stays short. JSON that decoding would
 silently merge, such as duplicate keys or invalid UTF-8, is hashed as sent.
@@ -265,3 +275,4 @@ a conversation's length; storing messages once by hash is planned.
 - Segmented log files with an index, for large logs and the dashboard.
 - Storing each message once, referenced by hash.
 - Roles, access logging, and exportable evidence bundles.
+- Redaction of bodies and reasoning, keeping their hashes.
