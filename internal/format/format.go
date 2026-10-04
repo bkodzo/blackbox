@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -64,6 +65,8 @@ type Response struct {
 	Text              string     // assistant text, concatenated across parts and chunks
 	TextToolCalls     []ToolCall // tool calls the model wrote as text instead of making them
 	TextScanPartial   bool       // the text was too long or complex to scan completely
+	Reasoning         string     // the model's reasoning, when the server returns it
+	ReasoningRedacted int        // reasoning blocks the server returned only in encrypted form
 	Input, Output     int        // token usage
 	Total             int
 	Chunks            int // stream events, 0 for non-streamed responses
@@ -97,6 +100,10 @@ func Parse(req, resp []byte, sse bool) Parsed {
 	}
 	if p.Response.Total == 0 {
 		p.Response.Total = p.Response.Input + p.Response.Output
+	}
+	if p.Response.Reasoning == "" {
+		// Some models write their reasoning inline, between think tags.
+		p.Response.Text, p.Response.Reasoning = splitThinking(p.Response.Text)
 	}
 	p.Response.TextToolCalls, p.Response.TextScanPartial = findTextToolCalls(p.Response.Text)
 	return p
@@ -148,9 +155,7 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 		json.Unmarshal(m, &rm)
 		c := canonicalMessage(m)
 		msg := Message{Role: rm.Role, SHA256: hexSum(c)}
-		if text := strings.TrimSpace(textOf(rm.Content)); text != "" {
-			msg.TextSHA256 = hexSum([]byte(text))
-		}
+		msg.TextSHA256 = TextHash(textOf(rm.Content))
 		for _, tc := range rm.ToolCalls {
 			msg.ToolCalls = append(msg.ToolCalls, ToolCall{tc.ID, tc.Function.Name, CanonicalArgs(tc.Function.Arguments)})
 		}
@@ -214,11 +219,29 @@ func CanonicalArgs(args string) string {
 }
 
 // TextHash is the hash used for comparing reply text, "" for empty text.
+// Inline reasoning between think tags is left out, so an agent that strips
+// it before echoing a reply still matches.
 func TextHash(text string) string {
+	text, _ = splitThinking(text)
 	if text = strings.TrimSpace(text); text == "" {
 		return ""
 	}
 	return hexSum([]byte(text))
+}
+
+var thinkTags = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
+
+// splitThinking separates reasoning a model wrote between think tags from
+// the rest of its reply.
+func splitThinking(text string) (visible, reasoning string) {
+	if !strings.Contains(text, "<think>") {
+		return text, ""
+	}
+	var parts []string
+	for _, m := range thinkTags.FindAllStringSubmatch(text, -1) {
+		parts = append(parts, strings.TrimSpace(m[1]))
+	}
+	return thinkTags.ReplaceAllString(text, ""), strings.Join(parts, "\n\n")
 }
 
 // usage accepts every common spelling of token counts.
@@ -250,11 +273,12 @@ type chatToolCall struct {
 }
 
 type contentBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text"`
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	Thinking string          `json:"thinking"`
+	ID       string          `json:"id"`
+	Name     string          `json:"name"`
+	Input    json.RawMessage `json:"input"`
 }
 
 // body covers non-streamed responses of both shapes.
@@ -268,10 +292,24 @@ type body struct {
 		Message      struct {
 			Content   json.RawMessage `json:"content"`
 			ToolCalls []chatToolCall  `json:"tool_calls"`
+			reasoningFields
 		} `json:"message"`
 	} `json:"choices"`
 	StopReason string         `json:"stop_reason"`
 	Content    []contentBlock `json:"content"`
+}
+
+// reasoningFields are the names chat-shaped servers use for reasoning.
+type reasoningFields struct {
+	ReasoningContent string `json:"reasoning_content"`
+	Reasoning        string `json:"reasoning"`
+}
+
+func (f reasoningFields) text() string {
+	if f.ReasoningContent != "" {
+		return f.ReasoningContent
+	}
+	return f.Reasoning
 }
 
 func parseBody(b []byte, r *Response) string {
@@ -288,6 +326,7 @@ func parseBody(b []byte, r *Response) string {
 				r.FinishReason = c.FinishReason
 			}
 			r.Text += textOf(c.Message.Content)
+			r.Reasoning += c.Message.text()
 			for _, tc := range c.Message.ToolCalls {
 				r.ToolCalls = append(r.ToolCalls, ToolCall{tc.ID, tc.Function.Name, tc.Function.Arguments})
 			}
@@ -299,6 +338,10 @@ func parseBody(b []byte, r *Response) string {
 			switch c.Type {
 			case "text":
 				r.Text += c.Text
+			case "thinking":
+				r.Reasoning += c.Thinking
+			case "redacted_thinking":
+				r.ReasoningRedacted++
 			case "tool_use":
 				r.ToolCalls = append(r.ToolCalls, ToolCall{c.ID, c.Name, string(compact(c.Input))})
 			}
@@ -319,6 +362,7 @@ type event struct {
 		Delta        struct {
 			Content   string         `json:"content"`
 			ToolCalls []chatToolCall `json:"tool_calls"`
+			reasoningFields
 		} `json:"delta"`
 	} `json:"choices"`
 	Message *struct {
@@ -331,6 +375,7 @@ type event struct {
 		StopReason  string `json:"stop_reason"`
 		PartialJSON string `json:"partial_json"`
 		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
 	} `json:"delta"`
 }
 
@@ -354,7 +399,7 @@ func parseStream(b []byte, r *Response) string {
 		return c
 	}
 	args := map[int]*bytes.Buffer{}
-	var text strings.Builder
+	var text, reasoning strings.Builder
 
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	sc.Buffer(make([]byte, 0, 64<<10), 64<<20)
@@ -384,6 +429,7 @@ func parseStream(b []byte, r *Response) string {
 					r.FinishReason = c.FinishReason
 				}
 				text.WriteString(c.Delta.Content)
+				reasoning.WriteString(c.Delta.text())
 				for _, d := range c.Delta.ToolCalls {
 					key, ok := slot[d.Index]
 					if !ok || startsNewCall(calls[key], d) {
@@ -414,6 +460,9 @@ func parseStream(b []byte, r *Response) string {
 			}
 		case "content_block_start":
 			format = Blocks
+			if e.ContentBlock.Type == "redacted_thinking" {
+				r.ReasoningRedacted++
+			}
 			if e.ContentBlock.Type == "tool_use" {
 				tc := call(e.Index)
 				tc.ID, tc.Name = e.ContentBlock.ID, e.ContentBlock.Name
@@ -424,6 +473,7 @@ func parseStream(b []byte, r *Response) string {
 				buf.WriteString(e.Delta.PartialJSON)
 			}
 			text.WriteString(e.Delta.Text)
+			reasoning.WriteString(e.Delta.Thinking)
 		case "message_delta":
 			format = Blocks
 			if e.Delta.StopReason != "" {
@@ -432,7 +482,7 @@ func parseStream(b []byte, r *Response) string {
 		}
 	}
 
-	r.Text = text.String()
+	r.Text, r.Reasoning = text.String(), reasoning.String()
 	for _, i := range order {
 		tc := calls[i]
 		if buf, ok := args[i]; ok {

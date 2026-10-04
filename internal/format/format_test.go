@@ -1,6 +1,7 @@
 package format
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -417,3 +418,52 @@ func TestNestedCacheMarkersInToolResults(t *testing.T) {
 		t.Fatal("a cache marker inside a tool result changed the hash")
 	}
 }
+
+func TestReasoningIsExtractedFromEveryShape(t *testing.T) {
+	cases := map[string]struct {
+		resp string
+		sse  bool
+	}{
+		"chat reasoning_content": {`{"choices":[{"message":{"content":"Answer.","reasoning_content":"I should check the files."}}]}`, false},
+		"chat reasoning":         {`{"choices":[{"message":{"content":"Answer.","reasoning":"I should check the files."}}]}`, false},
+		"blocks thinking":        {`{"type":"message","content":[{"type":"thinking","thinking":"I should check the files."},{"type":"text","text":"Answer."}]}`, false},
+		"chat stream": {"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"I should \"}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"check the files.\"}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"}}]}\n\n", true},
+		"blocks stream": {"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"I should check the files.\"}}\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Answer.\"}}\n", true},
+		"inline think tags": {`{"choices":[{"message":{"content":"<think>I should check the files.</think>Answer."}}]}`, false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := Parse(nil, []byte(c.resp), c.sse)
+			if p.Response.Reasoning != "I should check the files." || strings.TrimSpace(p.Response.Text) != "Answer." {
+				t.Fatalf("reasoning %q text %q", p.Response.Reasoning, p.Response.Text)
+			}
+		})
+	}
+}
+
+func TestRedactedReasoningIsCounted(t *testing.T) {
+	p := Parse(nil, []byte(`{"type":"message","content":[{"type":"redacted_thinking","data":"abc"},{"type":"text","text":"Hi"}]}`), false)
+	if p.Response.ReasoningRedacted != 1 || p.Response.Reasoning != "" {
+		t.Fatalf("redacted %d reasoning %q", p.Response.ReasoningRedacted, p.Response.Reasoning)
+	}
+}
+
+func TestCallsInsideReasoningAreNotTextCalls(t *testing.T) {
+	text := `<think>Maybe {"name":"rm","parameters":{"path":"/"}} but no.</think>I will not delete anything.`
+	p := Parse(nil, []byte(`{"choices":[{"message":{"content":`+strconvQuote(text)+`}}]}`), false)
+	if len(p.Response.TextToolCalls) != 0 {
+		t.Fatalf("a call the model only considered was reported: %+v", p.Response.TextToolCalls)
+	}
+}
+
+func TestEchoWithoutThinkTagsMatches(t *testing.T) {
+	if TextHash("<think>hmm</think>Answer.") != TextHash("Answer.") {
+		t.Fatal("stripping inline reasoning changed the reply hash")
+	}
+}
+
+func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
