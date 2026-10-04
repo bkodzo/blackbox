@@ -137,7 +137,9 @@ type exchange struct {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Gate != nil {
 		if err := p.cfg.Gate(); err != nil {
-			http.Error(w, "blackbox: the audit log is unavailable, so the request was not forwarded: "+err.Error(),
+			// The cause is logged by the gateway; agents only learn that
+			// the request was refused.
+			http.Error(w, "blackbox: the audit log is unavailable, so the request was not forwarded",
 				http.StatusServiceUnavailable)
 			return
 		}

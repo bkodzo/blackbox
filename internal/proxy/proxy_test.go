@@ -287,7 +287,8 @@ func TestGateRefusesWhenAuditUnavailable(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "disk full") {
+	// The agent learns the request was refused, not the internal cause.
+	if resp.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(body), "disk full") {
 		t.Fatalf("status %d body %q", resp.StatusCode, body)
 	}
 }
