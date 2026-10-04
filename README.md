@@ -1,7 +1,6 @@
 # blackbox
 
 [![ci](https://github.com/bkodzo/blackbox/actions/workflows/ci.yml/badge.svg)](https://github.com/bkodzo/blackbox/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/bkodzo/blackbox)](https://goreportcard.com/report/github.com/bkodzo/blackbox)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 blackbox is an audit gateway for AI agents. It sits between an agent and any
@@ -43,48 +42,24 @@ Result: TAMPERED
 
 You can reproduce this with the [demo agent](examples/agent).
 
-## Install
+## Quick start
 
-Download a binary for macOS, Linux, or Windows from the
-[releases page](https://github.com/bkodzo/blackbox/releases), or:
+Download a binary from the [releases page](https://github.com/bkodzo/blackbox/releases),
+or install with Go:
 
 ```
 go install github.com/bkodzo/blackbox/cmd/blackbox@latest
 ```
 
-A container image is published as `ghcr.io/bkodzo/blackbox`. Keep the signing
-key in its own directory, mounted read-only, separate from the log. Run the
-container as your own user so it can write to the mounted directories:
+Then:
 
 ```
-mkdir -p keys data
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/keys:/keys" \
-  ghcr.io/bkodzo/blackbox init --dir /keys
-
-docker run -d -p 127.0.0.1:8080:8080 --user "$(id -u):$(id -g)" \
-  -v "$PWD/keys:/keys:ro" -v "$PWD/data:/data" \
-  ghcr.io/bkodzo/blackbox serve --listen 0.0.0.0:8080 \
-  --key /keys/key.ed25519 --upstream http://host.docker.internal:PORT
+blackbox init                                     # create the signing key
+blackbox serve --upstream http://127.0.0.1:PORT   # your model server's address
 ```
-
-Inside a container the gateway has to listen on `0.0.0.0`, so publish the port
-only on `127.0.0.1` (as above) or on a private network. The gateway has no
-authentication of its own: anyone who can reach it can use the model server
-through it. Checkpoints are printed to stdout, so `docker logs` or a log
-collector keeps a copy outside the data directory.
-
-## Quick start
-
-```
-blackbox init                                         # create the signing key
-blackbox serve --upstream http://127.0.0.1:PORT     # your model server's address
-```
-
-To classify tools by risk, pass a risk map with `--risk`; see
-[examples/risk.json](examples/risk.json).
 
 Point your agent at `http://127.0.0.1:8080` instead of the model server. Every
-path is forwarded unchanged. Then:
+path is forwarded unchanged. Then review what happened:
 
 ```
 blackbox sessions          # list recorded agent sessions
@@ -92,12 +67,9 @@ blackbox show SESSION      # what happened in one session
 blackbox verify            # check the log has not been altered
 ```
 
-`verify` exits with 0 if the log is intact, 1 if it was tampered with, 2 if it
-is intact with warnings, and 3 if it could not run.
-
-Agents can describe themselves with optional headers, which are removed before
-the request is forwarded: `X-Blackbox-Session`, `X-Blackbox-Parent-Session`,
-`X-Blackbox-Agent`, `X-Blackbox-Agent-Version`, and `X-Blackbox-Principal`.
+Settings, agent headers, and the risk map are described in
+[CONFIGURATION.md](docs/CONFIGURATION.md). Running it in a container or on a
+server is covered in [DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## How the log detects tampering
 
@@ -107,15 +79,10 @@ the request is forwarded: `X-Blackbox-Session`, `X-Blackbox-Parent-Session`,
 | Each entry is signed with the gateway's Ed25519 key | A chain rebuilt by someone without the key |
 | Each entry has exactly one valid encoding | Lines crafted so other JSON tools read different content |
 | Signed checkpoints go to a separate file and stdout | Entries removed from the end, and a log rewritten after a checkpoint |
-| The gateway will not start below its own checkpoint | Extending the chain over removed entries |
 
-Entries are hashed exactly as written, so verification never re-encodes JSON.
-API keys are never stored; each call records a fingerprint of the key instead.
-If the log cannot be written, the gateway refuses to forward traffic rather
-than let agents run unrecorded.
-See [DESIGN.md](docs/DESIGN.md) for the details and
-[THREAT_MODEL.md](docs/THREAT_MODEL.md) for what blackbox does and does not
-protect against.
+API keys are never stored, only a fingerprint of each. If the log cannot be
+written, the gateway refuses to forward traffic rather than let agents run
+unrecorded.
 
 ## What gets flagged
 
@@ -134,53 +101,23 @@ protect against.
 | `tool_call_in_text` | The model wrote a tool call into its reply text instead of making one |
 | `text_tool_call_executed` | The agent ran a call the model only wrote as text |
 
-Conversations are tracked with or without the session header, and survive a
-gateway restart. Anomalies are flags for review; blackbox never blocks a call.
+Anomalies are flags for review; blackbox never blocks a call.
 
-## Compatibility
+## How it works
 
-blackbox forwards any HTTP path and records the raw bytes of every exchange.
-It extracts model names, token usage, and tool calls from the two common
-response shapes (a `choices` array, or typed content blocks), streamed or not.
-Other formats are still recorded and hashed in full. See
-[SCHEMA.md](docs/SCHEMA.md) for every recorded field.
+blackbox forwards any HTTP path and records the exact bytes of every exchange.
+It reads model names, token usage, and tool calls from the two common response
+shapes, streamed or not, and records anything else in full. Parsing, signing,
+and disk writes happen off the request path, so the gateway adds well under a
+millisecond to each call. To measure it on your own hardware:
 
-## Performance
+```
+go test -run '^$' -bench . ./internal/recorder ./internal/ledger
+```
 
-On an Apple M3, measured with the benchmarks in `internal/recorder`:
-
-| Measure | Result |
-|---|---|
-| Added latency per call | about 0.17 ms |
-| Throughput through the gateway | about 6,500 calls/s |
-| Ledger appends, including fsync | about 55,000 entries/s |
-| Verification | about 230 MB/s |
-
-Parsing, signing, and disk writes happen off the request path. Writes are
-group-committed every 50 ms; `--sync always` fsyncs every entry instead.
-
-## Configuration
-
-Settings can be given as flags or in a JSON file passed with `--config`. Flags
-override the file.
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--upstream` | required | Base URL of the model server |
-| `--listen` | `127.0.0.1:8080` | Address to listen on |
-| `--log` | `blackbox.jsonl` | Audit log |
-| `--checkpoints` | `blackbox.checkpoints.jsonl` | Checkpoint file (required) |
-| `--key` | `~/.blackbox/key.ed25519` | Private signing key |
-| `--risk` | none | Risk map (see [examples/risk.json](examples/risk.json)) |
-| `--sync` | `group` | `group` or `always` |
-| `--max-body` | 32 MiB | Bytes of each body stored; hashes always cover everything |
-| `--max-request` | 64 MiB | Larger requests are refused with 413 and recorded |
-| `--max-in-flight` | `64` | Requests handled at once; more are refused with 503 and recorded |
-| `--checkpoint-stdout` | `true` | Also print checkpoints to stdout |
-| `--fail-open` | `false` | Keep forwarding if the log fails (default: refuse and exit) |
-| `--body-read-timeout` | `1m` | Limit for reading a request body |
-| `--upstream-timeout` | `10m` | Limit for the model server to start responding |
-| `--shutdown-timeout` | `30s` | Grace period for calls in flight at shutdown |
+[DESIGN.md](docs/DESIGN.md) explains the log format and the checks,
+[THREAT_MODEL.md](docs/THREAT_MODEL.md) what blackbox does and does not
+protect against, and [SCHEMA.md](docs/SCHEMA.md) every recorded field.
 
 ## Roadmap
 
