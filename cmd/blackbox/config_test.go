@@ -74,3 +74,20 @@ func TestDurationsParseFromJSON(t *testing.T) {
 		t.Fatalf("config %+v err %v", c, err)
 	}
 }
+
+func TestConfigKeysMustBeExact(t *testing.T) {
+	for name, body := range map[string]string{
+		"wrong case":    `{"upstream":"http://x:1","FAIL_OPEN":true}`,
+		"duplicate key": `{"upstream":"http://x:1","listen":"a:1","listen":"b:2"}`,
+		"trailing data": `{"upstream":"http://x:1"} {"fail_open":true}`,
+		"no checkpoint": `{"upstream":"http://x:1","checkpoints":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "c.json")
+			os.WriteFile(file, []byte(body), 0o600)
+			if _, err := parse(t, file); err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+}

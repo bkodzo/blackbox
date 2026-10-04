@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"time"
 )
 
@@ -107,10 +109,16 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 		if err != nil {
 			return c, err
 		}
+		if err := checkKeys(b); err != nil {
+			return c, fmt.Errorf("%s: %w", path, err)
+		}
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields() // a misspelled setting must not be silently ignored
 		if err := dec.Decode(&c); err != nil {
 			return c, fmt.Errorf("%s: %w", path, err)
+		}
+		if dec.More() {
+			return c, fmt.Errorf("%s: unexpected data after the configuration object", path)
 		}
 	}
 	fs.Visit(func(f *flag.Flag) {
@@ -148,6 +156,8 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 	switch {
 	case c.Upstream == "":
 		return c, errors.New("an upstream is required, e.g. --upstream http://127.0.0.1:9000")
+	case c.Checkpoints == "":
+		return c, errors.New("a checkpoint file is required: without one, entries removed from the end of the log cannot be detected")
 	case c.Sync != "group" && c.Sync != "always":
 		return c, errors.New(`sync must be "group" or "always"`)
 	case c.MaxBody <= 0 || c.MaxRequest <= 0:
@@ -156,6 +166,42 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 		return c, errors.New("timeouts must be positive")
 	}
 	return c, nil
+}
+
+// checkKeys rejects configuration keys that are not spelled exactly as
+// documented, or that appear twice. encoding/json alone would accept
+// "FAIL_OPEN" for "fail_open" and keep only the last of duplicate keys.
+func checkKeys(b []byte) error {
+	known := map[string]bool{}
+	t := reflect.TypeFor[config]()
+	for i := range t.NumField() {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		known[name] = true
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return errors.New("the configuration must be a JSON object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key := tok.(string)
+		switch {
+		case !known[key]:
+			return fmt.Errorf("unknown setting %q", key)
+		case seen[key]:
+			return fmt.Errorf("setting %q appears more than once", key)
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // fingerprint hashes the effective configuration together with the risk map
