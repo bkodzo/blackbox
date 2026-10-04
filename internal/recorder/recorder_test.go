@@ -192,6 +192,9 @@ func TestTextCallsAreFilteredWhenToolsAreOffered(t *testing.T) {
 	if strings.Join(names, ",") != "rm,list_dir" {
 		t.Fatalf("text calls kept: %v", names)
 	}
+	if call.Response.IgnoredTextCalls != 1 {
+		t.Fatalf("ignored %d text calls, want 1 (my-app)", call.Response.IgnoredTextCalls)
+	}
 }
 
 func TestRecentStartSkipsOldEntries(t *testing.T) {

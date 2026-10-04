@@ -615,6 +615,10 @@ func callChecks(c *record.LLMCall) {
 	if s := c.Response.Stream; s != nil && s.Outcome == record.StreamClientAborted {
 		flag(c, record.AnomalyStreamAborted, "client disconnected after %d chunks", s.Chunks)
 	}
+	if c.Response.TextScanPartial {
+		flag(c, record.AnomalyTextScanPartial,
+			"the reply text was too long or complex to search completely for tool calls written as text")
+	}
 	for _, tc := range c.Response.ToolCalls {
 		if tc.InText {
 			flag(c, record.AnomalyToolCallInText,

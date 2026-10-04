@@ -133,6 +133,13 @@ type Response struct {
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 	Usage        Usage      `json:"usage,omitzero"`
 	Stream       *Stream    `json:"stream,omitempty"`
+	// IgnoredTextCalls counts tool-call-shaped JSON in the reply text that was
+	// not counted as a call: it named a tool that was not offered and is not
+	// in the risk map.
+	IgnoredTextCalls int `json:"ignored_text_calls,omitempty"`
+	// TextScanPartial is set when the reply text was too long or complex to
+	// search completely for tool calls written as text.
+	TextScanPartial bool `json:"text_scan_partial,omitempty"`
 	// Upgraded is set when the server switched protocols (status 101).
 	// Traffic after the switch is passed through but not recorded.
 	Upgraded bool `json:"upgraded,omitempty"`
@@ -215,6 +222,7 @@ const (
 	AnomalyUnverifiableResult  = "unverifiable_tool_result"
 	AnomalyDuplicateToolResult = "duplicate_tool_result"
 	AnomalyTextCallExecuted    = "text_tool_call_executed"
+	AnomalyTextScanPartial     = "text_scan_partial"
 )
 
 // Exchange is one finished request and response as captured by the proxy,

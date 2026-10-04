@@ -502,3 +502,10 @@ func TestIdenticalRetryAfterFailureIsClean(t *testing.T) {
 	wantKinds(t, failed) // the failed call itself is checked normally
 	wantKinds(t, r.turn("s", req, respFinal))
 }
+
+func TestPartialTextScanIsFlagged(t *testing.T) {
+	call := &record.LLMCall{}
+	call.Response.TextScanPartial = true
+	New(0).Observe(call, format.Parsed{})
+	wantKinds(t, call, record.AnomalyTextScanPartial)
+}

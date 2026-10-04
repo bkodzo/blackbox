@@ -220,9 +220,12 @@ func Enrich(x record.Exchange, instanceID string, rm risk.Map) (*record.LLMCall,
 		if len(offered) == 0 || offered[tc.Name] || rm.Lookup(tc.Name).Risk != risk.Unknown {
 			kept = append(kept, tc)
 			add(tc, true)
+		} else {
+			rs.IgnoredTextCalls++
 		}
 	}
 	p.Response.TextToolCalls = kept
+	rs.TextScanPartial = p.Response.TextScanPartial
 	if rs.Stream != nil {
 		rs.Stream.Chunks = p.Response.Chunks
 	}
