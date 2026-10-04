@@ -133,6 +133,8 @@ type Response struct {
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 	Usage        Usage      `json:"usage,omitzero"`
 	Stream       *Stream    `json:"stream,omitempty"`
+	// Reasoning summarizes the model's reasoning, when the server returned it.
+	Reasoning *Reasoning `json:"reasoning,omitempty"`
 	// IgnoredTextCalls counts tool-call-shaped JSON in the reply text that was
 	// not counted as a call: it named a tool that was not offered and is not
 	// in the risk map.
@@ -155,6 +157,19 @@ type ToolCall struct {
 	Risk      string `json:"risk,omitempty"`
 	Category  string `json:"category,omitempty"`
 }
+
+// Reasoning summarizes the reasoning a model returned with its reply. The
+// full text is in the response body; this holds what a reviewer needs at a
+// glance without storing it twice.
+type Reasoning struct {
+	Preview        string `json:"preview,omitempty"` // the first ReasoningPreview characters
+	Chars          int    `json:"chars"`
+	SHA256         string `json:"sha256,omitempty"`
+	RedactedBlocks int    `json:"redacted_blocks,omitempty"` // returned only in encrypted form
+}
+
+// ReasoningPreview is how many characters of reasoning a record keeps.
+const ReasoningPreview = 500
 
 type Usage struct {
 	Input  int `json:"input,omitempty"`

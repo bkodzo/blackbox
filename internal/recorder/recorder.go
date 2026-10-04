@@ -4,11 +4,15 @@
 package recorder
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/bkodzo/blackbox/internal/format"
 	"github.com/bkodzo/blackbox/internal/ledger"
@@ -228,6 +232,15 @@ func Enrich(x record.Exchange, instanceID string, rm risk.Map) (*record.LLMCall,
 	rs.TextScanPartial = p.Response.TextScanPartial
 	if rs.Stream != nil {
 		rs.Stream.Chunks = p.Response.Chunks
+	}
+	if text := strings.TrimSpace(p.Response.Reasoning); text != "" || p.Response.ReasoningRedacted > 0 {
+		r := &record.Reasoning{Chars: utf8.RuneCountInString(text), RedactedBlocks: p.Response.ReasoningRedacted}
+		if text != "" {
+			sum := sha256.Sum256([]byte(text))
+			r.SHA256 = hex.EncodeToString(sum[:])
+			r.Preview = string([]rune(text)[:min(r.Chars, record.ReasoningPreview)])
+		}
+		rs.Reasoning = r
 	}
 	return call, p
 }

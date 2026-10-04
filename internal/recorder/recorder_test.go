@@ -230,3 +230,17 @@ func TestRecentStartSkipsOldEntries(t *testing.T) {
 		t.Fatalf("rebuilt %d calls, %d sessions, err %v", n, tracker.Sessions(), err)
 	}
 }
+
+func TestReasoningSummary(t *testing.T) {
+	long := strings.Repeat("why ", 300)
+	x := record.Exchange{Call: &record.LLMCall{}, Resp: []byte(`{"choices":[{"message":{"content":"ok","reasoning_content":"` + long + `"}}]}`)}
+	call, _ := Enrich(x, "gw", nil)
+	r := call.Response.Reasoning
+	if r == nil || r.Chars != len(strings.TrimSpace(long)) || len([]rune(r.Preview)) != record.ReasoningPreview || r.SHA256 == "" {
+		t.Fatalf("reasoning %+v", r)
+	}
+	x = record.Exchange{Call: &record.LLMCall{}, Resp: []byte(`{"choices":[{"message":{"content":"ok"}}]}`)}
+	if call, _ := Enrich(x, "gw", nil); call.Response.Reasoning != nil {
+		t.Fatal("a reply without reasoning got a reasoning field")
+	}
+}
