@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const chatRequest = `{
@@ -184,7 +185,7 @@ func TestTextToolCalls(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := findTextToolCalls(c.text); !reflect.DeepEqual(got, c.want) {
+			if got, _ := findTextToolCalls(c.text); !reflect.DeepEqual(got, c.want) {
 				t.Fatalf("got %+v\nwant %+v", got, c.want)
 			}
 		})
@@ -239,7 +240,7 @@ func TestCanonicalArgs(t *testing.T) {
 
 func TestSchemaDescriptionIsNotATextToolCall(t *testing.T) {
 	text := `The tool looks like {"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}`
-	if got := findTextToolCalls(text); got != nil {
+	if got, _ := findTextToolCalls(text); got != nil {
 		t.Fatalf("schema description reported as a call: %+v", got)
 	}
 }
@@ -277,7 +278,7 @@ func TestStreamedCallsWithoutIndexStaySeparate(t *testing.T) {
 }
 
 func TestOtherTextCallShapes(t *testing.T) {
-	got := findTextToolCalls(`{"action":"run_shell","action_input":"ls"} and {"tool":"read_file","tool_input":{"path":"a"}}`)
+	got, _ := findTextToolCalls(`{"action":"run_shell","action_input":"ls"} and {"tool":"read_file","tool_input":{"path":"a"}}`)
 	want := []ToolCall{{Name: "run_shell", Arguments: "ls"}, {Name: "read_file", Arguments: `{"path":"a"}`}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v", got)
@@ -286,8 +287,133 @@ func TestOtherTextCallShapes(t *testing.T) {
 
 func TestCodeBeforeACallDoesNotHideIt(t *testing.T) {
 	code := strings.Repeat("{x} ", 200)
-	got := findTextToolCalls(code + `{"name":"rm","parameters":{"path":"/"}}`)
+	got, _ := findTextToolCalls(code + `{"name":"rm","parameters":{"path":"/"}}`)
 	if len(got) != 1 || got[0].Name != "rm" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// Third review.
+
+func TestHugeExponentsStayShort(t *testing.T) {
+	start := time.Now()
+	out := CanonicalArgs(`[` + strings.Repeat(`1e1000000,`, 1000) + `1]`)
+	// Before the fix this was over 1 GB; the time limit is generous so slow
+	// or race-instrumented runners do not make the test flaky.
+	if len(out) > 20000 || time.Since(start) > 5*time.Second {
+		t.Fatalf("canonicalizing 10 KB of exponents produced %d bytes in %v", len(out), time.Since(start))
+	}
+}
+
+func TestCanonicalNumbers(t *testing.T) {
+	equal := [][2]string{
+		{"1", "1.0"}, {"100", "1e2"}, {"1.5", "15e-1"}, {"0", "-0.0"}, {"0.001", "1E-3"},
+		{"1" + strings.Repeat("0", 80), "1e80"}, {"1." + strings.Repeat("0", 70), "1"},
+	}
+	for _, p := range equal {
+		if canonicalNumber(p[0]) != canonicalNumber(p[1]) {
+			t.Errorf("%s and %s differ: %s vs %s", p[0], p[1], canonicalNumber(p[0]), canonicalNumber(p[1]))
+		}
+	}
+	different := [][2]string{{"1", "-1"}, {"0.1", "0.10000001"}, {"9007199254740993", "9007199254740992"}, {"1e400", "1e401"}}
+	for _, p := range different {
+		if canonicalNumber(p[0]) == canonicalNumber(p[1]) {
+			t.Errorf("%s and %s compared equal", p[0], p[1])
+		}
+	}
+}
+
+func TestDuplicateKeysAreNotMerged(t *testing.T) {
+	if CanonicalArgs(`{"cmd":"rm -rf /","cmd":"ls"}`) == CanonicalArgs(`{"cmd":"ls"}`) {
+		t.Fatal("a duplicate key hid a different value")
+	}
+	if CanonicalArgs(`{"a":{"x":1,"x":2}}`) == CanonicalArgs(`{"a":{"x":2}}`) {
+		t.Fatal("a nested duplicate key hid a different value")
+	}
+}
+
+func TestInvalidTextIsNotMerged(t *testing.T) {
+	backslash := string(rune(92))
+	a := `{"s":"` + backslash + `ud800"}`
+	b := `{"s":"` + backslash + `udfff"}`
+	if CanonicalArgs(a) == CanonicalArgs(b) {
+		t.Fatal("different lone surrogates compared equal")
+	}
+	if CanonicalArgs("{\"s\":\"\xff\"}") == CanonicalArgs("{\"s\":\"\xfe\"}") {
+		t.Fatal("different invalid bytes compared equal")
+	}
+}
+
+func TestNestedTextCalls(t *testing.T) {
+	text := `{"tool_calls":[{"type":"function","function":{"name":"run_shell","arguments":"{\"cmd\":\"ls\"}"}}]} ` +
+		`{"thought":"go","action":{"name":"read_file","arguments":{"path":"a"}}}`
+	got, partial := findTextToolCalls(text)
+	if partial || len(got) != 2 || got[0].Name != "run_shell" || got[1].Name != "read_file" {
+		t.Fatalf("got %+v partial %v", got, partial)
+	}
+}
+
+func TestJunkBeforeACallDoesNotHideIt(t *testing.T) {
+	got, partial := findTextToolCalls(strings.Repeat(`{"`, 1024) + ` {"name":"run_shell","arguments":{"cmd":"rm"}}`)
+	if partial || len(got) != 1 || got[0].Name != "run_shell" {
+		t.Fatalf("got %+v partial %v", got, partial)
+	}
+}
+
+func TestHostileTextIsCheapAndFlagged(t *testing.T) {
+	start := time.Now()
+	_, partial := findTextToolCalls(strings.Repeat(`{"a":`, 13000)) // about 64 KB of unterminated nesting
+	// Unbounded, this took seconds per reply; the limit leaves room for slow
+	// or race-instrumented runners.
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("scan took %v", elapsed)
+	}
+	if !partial {
+		t.Fatal("an incomplete scan was not reported")
+	}
+	if _, partial := findTextToolCalls(strings.Repeat("x", maxTextScan+1)); !partial {
+		t.Fatal("text beyond the scan limit was not reported")
+	}
+}
+
+func TestStreamWithAFreshIDPerChunk(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"id":"a1","function":{"name":"run_shell","arguments":"{\"cmd\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"id":"a2","function":{"arguments":"\"ls\"}"}}]}}]}`,
+	}, "\n\n")
+	p := Parse(nil, []byte(stream), true)
+	if want := []ToolCall{{"a1", "run_shell", `{"cmd":"ls"}`}}; !reflect.DeepEqual(p.Response.ToolCalls, want) {
+		t.Fatalf("calls %+v", p.Response.ToolCalls)
+	}
+}
+
+func TestStreamCallsWithoutIndexOrID(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"list_dir","arguments":"{}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"list_dir","arguments":"{\"path\":\"a\"}"}}]}}]}`,
+	}, "\n\n")
+	p := Parse(nil, []byte(stream), true)
+	if len(p.Response.ToolCalls) != 2 || p.Response.ToolCalls[1].Arguments != `{"path":"a"}` {
+		t.Fatalf("calls %+v", p.Response.ToolCalls)
+	}
+}
+
+func TestStreamRepeatingNameEveryChunk(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"run_shell","arguments":"{\"cmd\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"run_shell","arguments":"\"ls\"}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"run_shell","arguments":""}}]}}]}`,
+	}, "\n\n")
+	p := Parse(nil, []byte(stream), true)
+	if want := []ToolCall{{"c", "run_shell", `{"cmd":"ls"}`}}; !reflect.DeepEqual(p.Response.ToolCalls, want) {
+		t.Fatalf("calls %+v", p.Response.ToolCalls)
+	}
+}
+
+func TestNestedCacheMarkersInToolResults(t *testing.T) {
+	a := Parse([]byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"ok"}]}]}]}`), nil, false)
+	b := Parse([]byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"ok","cache_control":{"type":"ephemeral"}}]}]}]}`), nil, false)
+	if a.Request.Messages[0].SHA256 != b.Request.Messages[0].SHA256 {
+		t.Fatal("a cache marker inside a tool result changed the hash")
 	}
 }

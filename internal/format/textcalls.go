@@ -2,51 +2,99 @@ package format
 
 import (
 	"encoding/json"
+	"io"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 // Small models often write a tool call into their reply text instead of
 // making a structured call. Agents usually ignore it, but an auditor needs
 // to see that the model tried. Detection is a heuristic: a JSON object with a
-// tool-like name and arguments.
+// tool-like name and arguments, at the top level or nested inside other JSON.
 const (
-	maxTextScan   = 64 << 10 // bytes of reply text examined
-	maxCandidates = 1024     // failed decodes allowed, bounding work on hostile text
+	maxTextScan = 64 << 10 // bytes of reply text examined
+	maxScanWork = 4 << 20  // bytes the decoder may read in total, bounding work on hostile text
+	maxNesting  = 6        // levels of JSON searched for nested calls
+	readChunk   = 256      // the decoder reads in small steps, so failed candidates stay cheap
 )
 
 var toolName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.\-]{0,63}$`)
 
-func findTextToolCalls(text string) []ToolCall {
+// findTextToolCalls returns the calls found in text, and whether the scan
+// was cut short by its size or work limits.
+func findTextToolCalls(text string) (calls []ToolCall, partial bool) {
 	if len(text) > maxTextScan {
-		text = text[:maxTextScan]
+		text, partial = text[:maxTextScan], true
 	}
-	var out []ToolCall
-	// Only failed decodes count against the budget: a successful decode
-	// consumes its bytes, so the total work stays bounded by maxTextScan.
-	for i, failures := 0, 0; i < len(text) && failures < maxCandidates; {
+	var work int64
+	for i := 0; i < len(text); {
 		j := strings.IndexByte(text[i:], '{')
 		if j < 0 {
 			break
 		}
 		i += j
 		if !startsObject(text[i+1:]) {
-			i++ // braces in prose or code: not worth a decode, and not counted
+			i++ // braces in prose or code: not worth a decode
 			continue
 		}
-		dec := json.NewDecoder(strings.NewReader(text[i:]))
-		var obj map[string]json.RawMessage
-		if dec.Decode(&obj) != nil {
-			failures++
+		if work >= maxScanWork {
+			return calls, true
+		}
+		r := &meteredReader{r: strings.NewReader(text[i:]), n: &work}
+		dec := json.NewDecoder(r)
+		var raw json.RawMessage
+		if dec.Decode(&raw) != nil {
 			i++
 			continue
 		}
-		if tc, ok := asToolCall(obj); ok {
-			out = append(out, tc)
-		}
+		collectCalls(raw, 0, &calls)
 		i += int(dec.InputOffset())
 	}
-	return out
+	return calls, partial
+}
+
+// meteredReader hands the decoder small chunks and counts what it reads.
+type meteredReader struct {
+	r io.Reader
+	n *int64
+}
+
+func (m *meteredReader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p[:min(len(p), readChunk)])
+	*m.n += int64(n)
+	return n, err
+}
+
+// collectCalls finds tool call shapes in a JSON value. A value that is a
+// call is not searched further, so a call's own arguments are never counted
+// as more calls.
+func collectCalls(raw json.RawMessage, depth int, out *[]ToolCall) {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) == nil {
+		if tc, ok := asToolCall(obj); ok {
+			*out = append(*out, tc)
+			return
+		}
+		if depth >= maxNesting {
+			return
+		}
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys) // a stable order for the results
+		for _, k := range keys {
+			collectCalls(obj[k], depth+1, out)
+		}
+		return
+	}
+	var arr []json.RawMessage
+	if depth < maxNesting && json.Unmarshal(raw, &arr) == nil {
+		for _, x := range arr {
+			collectCalls(x, depth+1, out)
+		}
+	}
 }
 
 // toolShapes are the field pairs models use when writing a call as JSON:

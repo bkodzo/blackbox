@@ -17,8 +17,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"math/big"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Format names.
@@ -62,6 +63,7 @@ type Response struct {
 	ToolCalls         []ToolCall
 	Text              string     // assistant text, concatenated across parts and chunks
 	TextToolCalls     []ToolCall // tool calls the model wrote as text instead of making them
+	TextScanPartial   bool       // the text was too long or complex to scan completely
 	Input, Output     int        // token usage
 	Total             int
 	Chunks            int // stream events, 0 for non-streamed responses
@@ -96,7 +98,7 @@ func Parse(req, resp []byte, sse bool) Parsed {
 	if p.Response.Total == 0 {
 		p.Response.Total = p.Response.Input + p.Response.Output
 	}
-	p.Response.TextToolCalls = findTextToolCalls(p.Response.Text)
+	p.Response.TextToolCalls, p.Response.TextScanPartial = findTextToolCalls(p.Response.Text)
 	return p
 }
 
@@ -384,16 +386,16 @@ func parseStream(b []byte, r *Response) string {
 				text.WriteString(c.Delta.Content)
 				for _, d := range c.Delta.ToolCalls {
 					key, ok := slot[d.Index]
-					if !ok || (d.ID != "" && calls[key].ID != "" && calls[key].ID != d.ID) {
+					if !ok || startsNewCall(calls[key], d) {
 						key = nextSlot
 						nextSlot++
 						slot[d.Index] = key
 					}
 					tc := call(key)
-					if d.ID != "" {
+					if tc.ID == "" {
 						tc.ID = d.ID
 					}
-					if d.Function.Name != "" {
+					if tc.Name == "" {
 						tc.Name = d.Function.Name
 					}
 					tc.Arguments += d.Function.Arguments
@@ -447,6 +449,24 @@ func parseStream(b []byte, r *Response) string {
 // of those hashes. They are never removed from tool arguments or results.
 var annotationKeys = []string{"cache_control"}
 
+// startsNewCall reports whether a streamed tool call delta begins a new call
+// rather than continuing cur. Servers differ: some reuse index 0 for every
+// call, some repeat the ID or name in every chunk, some send a fresh ID per
+// chunk. A new call carries its name, and starts after the previous call's
+// arguments are complete.
+func startsNewCall(cur *ToolCall, d chatToolCall) bool {
+	name := d.Function.Name
+	switch {
+	case name == "":
+		return false
+	case d.ID != "" && cur.ID != "" && d.ID != cur.ID && cur.Name != "":
+		return true
+	case cur.Name != "" && json.Valid([]byte(cur.Arguments)):
+		return name != cur.Name || strings.HasPrefix(strings.TrimSpace(d.Function.Arguments), "{")
+	}
+	return false
+}
+
 // canonical re-encodes JSON with sorted keys, no insignificant space, and
 // numbers in one form, so equal content hashes equally regardless of how a
 // client serialized it.
@@ -458,6 +478,11 @@ func canonical(b []byte) []byte { return canonicalize(b, nil) }
 func canonicalMessage(b []byte) []byte { return canonicalize(b, stripAnnotations) }
 
 func canonicalize(b []byte, strip func(any)) []byte {
+	if !decodesFaithfully(b) {
+		// Decoding would merge distinct inputs (duplicate keys, invalid
+		// text), so hash the bytes as sent rather than risk hiding a change.
+		return compact(b)
+	}
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
@@ -475,8 +500,9 @@ func canonicalize(b []byte, strip func(any)) []byte {
 }
 
 // stripAnnotations removes annotation keys from an object (or each object
-// in an array, such as a list of system blocks) and from the blocks in its
-// content array. It does not descend further.
+// in an array, such as a list of system blocks), from the blocks in its
+// content array, and from the blocks inside those blocks' own content (as in
+// a tool result). It does not reach tool arguments or other values.
 func stripAnnotations(v any) {
 	switch v := v.(type) {
 	case []any:
@@ -487,12 +513,73 @@ func stripAnnotations(v any) {
 		}
 	case map[string]any:
 		dropKeys(v)
-		if content, ok := v["content"].([]any); ok {
-			for _, x := range content {
-				if m, ok := x.(map[string]any); ok {
-					dropKeys(m)
-				}
+		for _, block := range contentBlocks(v) {
+			dropKeys(block)
+			for _, inner := range contentBlocks(block) {
+				dropKeys(inner)
 			}
+		}
+	}
+}
+
+func contentBlocks(m map[string]any) []map[string]any {
+	content, _ := m["content"].([]any)
+	var blocks []map[string]any
+	for _, x := range content {
+		if b, ok := x.(map[string]any); ok {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks
+}
+
+// decodesFaithfully reports whether decoding b keeps every distinction in
+// it. Duplicate keys (only the last survives) and invalid UTF-8 or lone
+// surrogates (all become U+FFFD) would make different inputs look equal.
+func decodesFaithfully(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	hasReplacement := bytes.ContainsRune(b, utf8.RuneError) || bytes.Contains(bytes.ToLower(b), []byte(`\ufffd`))
+	type frame struct {
+		object    bool
+		keys      map[string]bool
+		expectKey bool
+	}
+	var stack []*frame
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return true // end of input, or malformed: the full decode decides
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{':
+				stack = append(stack, &frame{object: true, keys: map[string]bool{}, expectKey: true})
+				continue
+			case '[':
+				stack = append(stack, &frame{})
+				continue
+			default:
+				stack = stack[:len(stack)-1]
+			}
+		case string:
+			if !hasReplacement && strings.ContainsRune(t, utf8.RuneError) {
+				return false
+			}
+			if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
+				if stack[n-1].keys[t] {
+					return false
+				}
+				stack[n-1].keys[t], stack[n-1].expectKey = true, false
+				continue
+			}
+		}
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].expectKey = true // a value ended; a key comes next
 		}
 	}
 }
@@ -503,8 +590,8 @@ func dropKeys(m map[string]any) {
 	}
 }
 
-// normalizeNumbers rewrites every number in its exact rational form, so 1,
-// 1.0, and 1e0 compare equal while distinct values stay distinct.
+// normalizeNumbers rewrites every number in one canonical form, so 1, 1.0,
+// and 1e0 compare equal while distinct values stay distinct.
 func normalizeNumbers(v any) any {
 	switch v := v.(type) {
 	case map[string]any:
@@ -516,14 +603,44 @@ func normalizeNumbers(v any) any {
 			v[i] = normalizeNumbers(x)
 		}
 	case json.Number:
-		if len(v) > 64 { // do not expand huge exponents
-			return v
-		}
-		if r, ok := new(big.Rat).SetString(string(v)); ok {
-			return json.Number(r.RatString())
-		}
+		return json.Number(canonicalNumber(string(v)))
 	}
 	return v
+}
+
+// canonicalNumber writes a JSON number as its significant digits and a
+// power of ten ("15e-1" for 1.5, "1e2" for 100, "0" for any zero). It works
+// on the digits as text, so the cost is linear in the input and a number like
+// 1e1000000 stays short.
+func canonicalNumber(n string) string {
+	s := strings.ToLower(n)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	mant, expText, hasExp := strings.Cut(s, "e")
+	var exp int64
+	if hasExp {
+		e, err := strconv.ParseInt(expText, 10, 64)
+		if err != nil || e > 1<<40 || e < -(1<<40) {
+			return n // absurd exponent: keep as written
+		}
+		exp = e
+	}
+	whole, frac, _ := strings.Cut(mant, ".")
+	digits := strings.TrimLeft(whole+frac, "0")
+	exp -= int64(len(frac))
+	if digits == "" {
+		return "0"
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	exp += int64(len(digits) - len(trimmed))
+	out := trimmed
+	if exp != 0 {
+		out += "e" + strconv.FormatInt(exp, 10)
+	}
+	if neg {
+		out = "-" + out
+	}
+	return out
 }
 
 func compact(b []byte) []byte {
