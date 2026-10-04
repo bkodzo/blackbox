@@ -175,6 +175,7 @@ const (
 	ErrorClientAborted       = "client_aborted"
 	ErrorGatewayShutdown     = "gateway_shutdown"
 	ErrorRequestTooLarge     = "request_too_large"
+	ErrorGatewayBusy         = "gateway_busy"
 )
 
 type Error struct {

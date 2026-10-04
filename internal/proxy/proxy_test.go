@@ -369,3 +369,39 @@ func TestShutdownCancellationIsRecorded(t *testing.T) {
 		t.Fatalf("error %+v aborted %d", c.Error, p.Aborted())
 	}
 }
+
+func TestRequestsBeyondTheLimitAreRefusedAndRecorded(t *testing.T) {
+	arrived, release := make(chan struct{}), make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		<-release
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	caps := make(chan record.Exchange, 4)
+	srv := httptest.NewServer(New(Config{Upstream: u, MaxInFlight: 1, Sink: func(c record.Exchange) { caps <- c }}))
+	defer srv.Close()
+
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		if resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`)); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-arrived // the first request now holds the only slot
+
+	resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", resp.StatusCode)
+	}
+	if c := <-caps; c.Call.Error == nil || c.Call.Error.Class != record.ErrorGatewayBusy {
+		t.Fatalf("refused request recorded as %+v", c.Call.Error)
+	}
+	close(release)
+	<-first
+}

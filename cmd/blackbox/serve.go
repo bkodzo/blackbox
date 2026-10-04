@@ -175,6 +175,7 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		Gate:            gate,
 		MaxBody:         cfg.MaxBody,
 		MaxRequest:      cfg.MaxRequest,
+		MaxInFlight:     cfg.MaxInFlight,
 		BodyReadTimeout: time.Duration(cfg.BodyReadTimeout),
 		UpstreamTimeout: time.Duration(cfg.UpstreamTimeout),
 	})

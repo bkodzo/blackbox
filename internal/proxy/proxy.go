@@ -46,6 +46,7 @@ const (
 	DefaultMaxRequest      = 64 << 20
 	DefaultBodyReadTimeout = time.Minute
 	DefaultUpstreamTimeout = 10 * time.Minute
+	DefaultMaxInFlight     = 64
 )
 
 // ErrShutdown is the cancellation cause the gateway uses for calls still in
@@ -61,8 +62,12 @@ type Config struct {
 	// request with 503, so traffic is never forwarded unrecorded.
 	Gate func() error
 
-	MaxBody         int64         // bytes of each body to store; hashes cover all bytes
-	MaxRequest      int64         // larger requests are refused with 413
+	MaxBody    int64 // bytes of each body to store; hashes cover all bytes
+	MaxRequest int64 // larger requests are refused with 413
+	// MaxInFlight bounds requests handled at once, and so memory: at most
+	// MaxInFlight * (MaxRequest + MaxBody) bytes of bodies. Requests beyond
+	// it are refused with 503 and recorded.
+	MaxInFlight     int
 	BodyReadTimeout time.Duration // limit for reading a request body
 	UpstreamTimeout time.Duration // limit for the upstream's response headers
 	Transport       http.RoundTripper
@@ -72,6 +77,7 @@ type Config struct {
 type Proxy struct {
 	cfg      Config
 	rp       *httputil.ReverseProxy
+	slots    chan struct{}
 	inflight sync.WaitGroup
 	aborted  atomic.Uint64
 }
@@ -92,6 +98,9 @@ func New(cfg Config) *Proxy {
 	if cfg.UpstreamTimeout <= 0 {
 		cfg.UpstreamTimeout = DefaultUpstreamTimeout
 	}
+	if cfg.MaxInFlight <= 0 {
+		cfg.MaxInFlight = DefaultMaxInFlight
+	}
 	base := cfg.Transport
 	if base == nil {
 		// All traffic goes to one host. The default pool keeps only two idle
@@ -103,7 +112,7 @@ func New(cfg Config) *Proxy {
 		t.ResponseHeaderTimeout = cfg.UpstreamTimeout
 		base = t
 	}
-	p := &Proxy{cfg: cfg}
+	p := &Proxy{cfg: cfg, slots: make(chan struct{}, cfg.MaxInFlight)}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:   p.rewrite,
 		Transport: timedTransport{base},
@@ -150,6 +159,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	received := time.Now().UTC()
 	ex := &exchange{call: newCall(r, p.cfg.Upstream, received), span: randomHex(8)}
 	ex.call.Trace = trace(r.Header.Get("Traceparent"), ex.span)
+
+	select {
+	case p.slots <- struct{}{}:
+		defer func() { <-p.slots }()
+	default:
+		ex.call.Error = &record.Error{Class: record.ErrorGatewayBusy, Message: "too many requests in flight"}
+		ex.call.Response.Status = http.StatusServiceUnavailable
+		http.Error(w, "blackbox: too many requests in flight", http.StatusServiceUnavailable)
+		p.finish(ex, r)
+		return
+	}
 
 	reqBody, err := p.readBody(w, r)
 	ex.req = p.stored(reqBody)

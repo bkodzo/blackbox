@@ -49,6 +49,7 @@ type config struct {
 	Sync            string   `json:"sync"` // "group" or "always"
 	MaxBody         int64    `json:"max_body_bytes"`
 	MaxRequest      int64    `json:"max_request_bytes"`
+	MaxInFlight     int      `json:"max_in_flight"`
 	MirrorCPs       bool     `json:"checkpoint_stdout"`
 	FailOpen        bool     `json:"fail_open"`
 	BodyReadTimeout duration `json:"body_read_timeout"`
@@ -65,6 +66,7 @@ func defaultConfig() config {
 		Sync:            "group",
 		MaxBody:         32 << 20,
 		MaxRequest:      64 << 20,
+		MaxInFlight:     64,
 		MirrorCPs:       true,
 		BodyReadTimeout: duration(time.Minute),
 		UpstreamTimeout: duration(10 * time.Minute),
@@ -92,6 +94,7 @@ func serveFlags(fs *flag.FlagSet, f *config) *string {
 	fs.StringVar(&f.Sync, "sync", "", `"group" (batched fsync, default) or "always" (fsync every record)`)
 	fs.Int64Var(&f.MaxBody, "max-body", 0, "bytes of each body to store (default 32 MiB); hashes always cover all bytes")
 	fs.Int64Var(&f.MaxRequest, "max-request", 0, "largest request accepted (default 64 MiB); larger ones get 413")
+	fs.IntVar(&f.MaxInFlight, "max-in-flight", 0, "requests handled at once (default 64); more get 503")
 	fs.BoolVar(&f.MirrorCPs, "checkpoint-stdout", true, "also print each checkpoint to stdout")
 	fs.BoolVar(&f.FailOpen, "fail-open", false, "keep forwarding traffic if the audit log fails (default: refuse with 503 and exit)")
 	fs.Var(&f.BodyReadTimeout, "body-read-timeout", "limit for reading a request body (default 1m)")
@@ -141,6 +144,8 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 			c.MaxBody = flags.MaxBody
 		case "max-request":
 			c.MaxRequest = flags.MaxRequest
+		case "max-in-flight":
+			c.MaxInFlight = flags.MaxInFlight
 		case "checkpoint-stdout":
 			c.MirrorCPs = flags.MirrorCPs
 		case "fail-open":
@@ -160,8 +165,8 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 		return c, errors.New("a checkpoint file is required: without one, entries removed from the end of the log cannot be detected")
 	case c.Sync != "group" && c.Sync != "always":
 		return c, errors.New(`sync must be "group" or "always"`)
-	case c.MaxBody <= 0 || c.MaxRequest <= 0:
-		return c, errors.New("body and request limits must be positive")
+	case c.MaxBody <= 0 || c.MaxRequest <= 0 || c.MaxInFlight <= 0:
+		return c, errors.New("body, request, and in-flight limits must be positive")
 	case c.BodyReadTimeout <= 0 || c.UpstreamTimeout <= 0 || c.ShutdownTimeout <= 0:
 		return c, errors.New("timeouts must be positive")
 	}
