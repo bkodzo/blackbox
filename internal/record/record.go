@@ -212,6 +212,8 @@ const (
 	AnomalyHighRiskTool        = "high_risk_tool"
 	AnomalyToolCallInText      = "tool_call_in_text"
 	AnomalyUnverifiableResult  = "unverifiable_tool_result"
+	AnomalyDuplicateToolResult = "duplicate_tool_result"
+	AnomalyTextCallExecuted    = "text_tool_call_executed"
 )
 
 // Exchange is one finished request and response as captured by the proxy,
