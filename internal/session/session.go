@@ -88,6 +88,11 @@ type Observation struct {
 	system    string
 	adopted   map[string]uint64 // IDs the agent assigned to calls the model returned without IDs
 	answered  []string          // tool call IDs answered by this request
+	failed    bool              // the call got no reply; the conversation state is left unchanged
+	// For a new branch: the issued and answered tool calls it shares with the
+	// branch it diverged from.
+	inheritIssued   map[string]uint64
+	inheritAnswered map[string]bool
 }
 
 // Observe checks call against its conversation so far and fills in
@@ -103,6 +108,7 @@ func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 		tools:  p.Request.ToolsSHA256,
 		system: p.Request.SystemSHA256,
 		text:   format.TextHash(p.Response.Text),
+		failed: c.Error != nil,
 	}
 	for _, m := range msgs {
 		obs.messages = append(obs.messages, m.SHA256)
@@ -129,11 +135,16 @@ func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 		c.Session.Conversation = obs.root[:16]
 		if s = t.match(obs.root, obs.messages, msgs); s != nil {
 			start = len(s.messages)
-		} else if s = t.closest(obs.root, obs.messages); s != nil {
-			// The history diverges from every branch seen so far: check it
-			// against the closest one, and record it as a new branch.
+		} else if closest, n := t.closest(obs.root, obs.messages); closest != nil && sharesModelTurn(msgs, n) {
+			// The history diverges from every branch seen so far, after at
+			// least one model reply they have in common: check it against the
+			// closest branch and record it as a new branch, which inherits only
+			// the tool calls in the shared part. Conversations that share no
+			// more than their opening are unrelated and start fresh.
+			s = closest
 			start = historyCheck(c, s, obs.messages, msgs)
 			obs.branch = true
+			obs.inheritIssued, obs.inheritAnswered = shared(s, msgs[:n])
 		}
 	}
 	obs.state = s
@@ -239,6 +250,13 @@ func checkAdded(c *record.LLMCall, s *state, added []format.Message, obs *Observ
 		}
 	}
 
+	for _, m := range added {
+		if m.Role == "system" || m.Role == "developer" {
+			flag(c, record.AnomalySystemPromptChanged,
+				"a %s message was added mid-conversation after turn %d", m.Role, s.turn)
+		}
+	}
+
 	seen := map[string]bool{}
 	for _, m := range added {
 		for _, id := range m.ToolResultFor {
@@ -321,7 +339,9 @@ func checkEcho(c *record.LLMCall, s *state, echo format.Message) map[string]uint
 		}
 	}
 	switch {
-	case s.text == "" || echo.TextSHA256 == s.text:
+	case echo.TextSHA256 == s.text:
+	case s.text == "":
+		flag(c, record.AnomalyHistoryRewritten, "the echoed reply contains text the model never returned")
 	case echo.TextSHA256 == "":
 		flag(c, record.AnomalyHistoryRewritten, "the model's reply text was left out of the echoed reply")
 	default:
@@ -358,8 +378,9 @@ func (t *Tracker) match(root string, cur []string, msgs []format.Message) *state
 }
 
 // closest finds the branch with the same opening that shares the longest
-// common prefix with cur, preferring the most recent.
-func (t *Tracker) closest(root string, cur []string) *state {
+// common prefix with cur, preferring the most recent, and returns the length
+// of that prefix.
+func (t *Tracker) closest(root string, cur []string) (*state, int) {
 	var best *state
 	bestN := -1
 	for _, s := range t.convs[root] {
@@ -371,7 +392,33 @@ func (t *Tracker) closest(root string, cur []string) *state {
 			best, bestN = s, n
 		}
 	}
-	return best
+	return best, bestN
+}
+
+// sharesModelTurn reports whether the first n messages include a model reply,
+// which makes two conversations with the same opening related.
+func sharesModelTurn(msgs []format.Message, n int) bool {
+	return slices.ContainsFunc(msgs[:max(n, 0)], func(m format.Message) bool { return m.Role == "assistant" })
+}
+
+// shared returns the tool calls issued and answered within the common part
+// of a conversation, so a new branch inherits nothing from after the point
+// where it diverged.
+func shared(s *state, common []format.Message) (map[string]uint64, map[string]bool) {
+	issued, answered := map[string]uint64{}, map[string]bool{}
+	for _, m := range common {
+		for _, tc := range m.ToolCalls {
+			if seq, ok := s.issued[tc.ID]; ok && tc.ID != "" {
+				issued[tc.ID] = seq
+			}
+		}
+		for _, id := range m.ToolResultFor {
+			if s.answered[id] {
+				answered[id] = true
+			}
+		}
+	}
+	return issued, answered
 }
 
 // echoes reports whether m looks like the reply s's model gave.
@@ -398,18 +445,32 @@ func (t *Tracker) CommitAt(obs *Observation, seq uint64, at time.Time) {
 		return
 	}
 	s := obs.state
+	if obs.failed {
+		// The call got no reply, so nothing it sent was answered. Leave the
+		// conversation as it was, so a retry is checked against the last turn
+		// that succeeded.
+		if s != nil && !obs.branch {
+			s.turn++
+			s.lastSeen = at
+		}
+		return
+	}
 	if s == nil || obs.branch {
 		n := &state{key: obs.sessionID, root: obs.root, issued: map[string]uint64{}, answered: map[string]bool{}}
-		if s != nil { // a new branch inherits what the conversation has issued and answered
-			n.turn, n.issued, n.answered = s.turn, maps.Clone(s.issued), maps.Clone(s.answered)
+		if s != nil {
+			n.turn = s.turn
+			n.calls, n.textCalls, n.text, n.replied = s.calls, s.textCalls, s.text, s.replied
+			maps.Copy(n.issued, obs.inheritIssued)
+			maps.Copy(n.answered, obs.inheritAnswered)
 		}
 		s = n
+		s.lastSeen, s.lastSeq = at, seq // set before insert, so the new state is the most recent
 		t.insert(s)
 	}
 	s.turn++
 	s.lastSeen, s.lastSeq = at, seq
-	s.messages, s.calls, s.textCalls = obs.messages, obs.calls, obs.textCalls
-	s.text, s.tools, s.system = obs.text, obs.tools, obs.system
+	s.messages, s.tools, s.system = obs.messages, obs.tools, obs.system
+	s.calls, s.textCalls, s.text = obs.calls, obs.textCalls, obs.text
 	s.replied = len(obs.calls) > 0 || obs.text != ""
 	for _, tc := range obs.calls {
 		if tc.id != "" {
@@ -435,7 +496,7 @@ func (t *Tracker) insert(s *state) {
 	} else {
 		branches := t.convs[s.root]
 		if len(branches) >= MaxBranches {
-			oldest := slices.MinFunc(branches, func(a, b *state) int { return a.lastSeen.Compare(b.lastSeen) })
+			oldest := slices.MinFunc(branches, func(a, b *state) int { return a.lastSeen.Compare(b.lastSeen) }) // s is not in branches yet
 			t.remove(oldest)
 			branches = t.convs[s.root]
 		}
@@ -443,14 +504,15 @@ func (t *Tracker) insert(s *state) {
 		t.count++
 	}
 	for t.count > MaxStates {
-		t.remove(t.leastRecent())
+		t.remove(t.leastRecent(s))
 	}
 }
 
-func (t *Tracker) leastRecent() *state {
+// leastRecent returns the least recently used state other than keep.
+func (t *Tracker) leastRecent(keep *state) *state {
 	var lru *state
 	consider := func(s *state) {
-		if lru == nil || s.lastSeen.Before(lru.lastSeen) {
+		if s != keep && (lru == nil || s.lastSeen.Before(lru.lastSeen)) {
 			lru = s
 		}
 	}
@@ -565,8 +627,10 @@ func callChecks(c *record.LLMCall) {
 }
 
 // pinnedVersion matches what servers append to a model name when resolving
-// an alias to a pinned release: a date or a plain version number.
-var pinnedVersion = regexp.MustCompile(`^[-:](\d{8}|\d{4}-\d{2}-\d{2}|v?\d+(\.\d+)*)$`)
+// an alias to a pinned release.
+// Only dates and zero-padded snapshot numbers count; a bare "-5" or ":8"
+// usually names a different model.
+var pinnedVersion = regexp.MustCompile(`^[-:](\d{8}|\d{4}-\d{2}-\d{2}|0\d{2,3})$`)
 
 // sameModel reports whether served is the requested model or a pinned
 // release of it. "latest" aliases and "@" version separators are normalized.

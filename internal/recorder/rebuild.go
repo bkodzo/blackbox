@@ -58,7 +58,8 @@ func Rebuild(path string, idle time.Duration) (*session.Tracker, int, error) {
 			return nil
 		}
 		p := format.Parse(bodyBytes(c.Request.Body), bodyBytes(c.Response.Body), c.Response.Stream != nil)
-		scratch := record.LLMCall{Session: record.Session{ID: c.Session.ID}}
+		// Carry the error over, so failed calls are replayed as failed.
+		scratch := record.LLMCall{Session: record.Session{ID: c.Session.ID}, Error: c.Error}
 		t.CommitAt(t.Observe(&scratch, p), e.Seq, c.Timing.CompletedAt)
 		n++
 		return nil
