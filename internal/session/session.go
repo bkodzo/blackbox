@@ -488,6 +488,14 @@ func (t *Tracker) remove(s *state) {
 	}
 }
 
+// Forget drops what is known about a session, so its next call is treated
+// as the start of a conversation.
+func (t *Tracker) Forget(sessionID string) {
+	if s, ok := t.sessions[sessionID]; ok && sessionID != "" {
+		t.remove(s)
+	}
+}
+
 // Sessions reports how many conversations are being tracked.
 func (t *Tracker) Sessions() int { return t.count }
 

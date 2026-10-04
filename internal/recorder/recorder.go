@@ -82,7 +82,6 @@ func (r *Recorder) Submit(x record.Exchange) {
 	}
 	if r.closed {
 		r.unrecorded.Add(1)
-		log.Printf("blackbox: AUDIT RECORD NOT WRITTEN: recorder is closed")
 		return
 	}
 	r.queue = append(r.queue, x)
@@ -98,6 +97,9 @@ func (r *Recorder) Close() {
 	r.cond.Broadcast()
 	r.mu.Unlock()
 	<-r.done
+	if n := r.unrecorded.Load(); n > 0 {
+		log.Printf("blackbox: %d audit records were not written", n)
+	}
 }
 
 // Calls returns how many calls have been written.
@@ -140,9 +142,11 @@ func (r *Recorder) run() {
 		}
 		if err := r.write(x); err != nil {
 			r.unrecorded.Add(1)
-			log.Printf("blackbox: AUDIT RECORD NOT WRITTEN: %v", err)
-			if r.failed.CompareAndSwap(nil, &err) && r.opt.OnFailure != nil {
-				r.opt.OnFailure(err)
+			if r.failed.CompareAndSwap(nil, &err) {
+				log.Printf("blackbox: AUDIT RECORD NOT WRITTEN: %v", err)
+				if r.opt.OnFailure != nil {
+					r.opt.OnFailure(err)
+				}
 			}
 		}
 	}

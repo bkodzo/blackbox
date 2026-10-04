@@ -193,3 +193,37 @@ func TestTextCallsAreFilteredWhenToolsAreOffered(t *testing.T) {
 		t.Fatalf("text calls kept: %v", names)
 	}
 }
+
+func TestRecentStartSkipsOldEntries(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log.jsonl")
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	l, _ := ledger.Open(logPath, priv, ledger.Options{})
+	old := time.Now().Add(-48 * time.Hour)
+	pad := strings.Repeat("x", 2000)
+	for i := range 2000 { // about 4 MB of old calls
+		c := record.LLMCall{Type: record.TypeLLMCall, Timing: record.Timing{CompletedAt: old.Add(time.Duration(i) * time.Second)}}
+		c.Request.Body.Text = pad
+		b, _ := json.Marshal(c)
+		l.Append(b)
+	}
+	recent := record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "s"}, Timing: record.Timing{CompletedAt: time.Now()}}
+	recent.Request.Body.Text = `{"messages":[{"role":"user","content":"hi"}]}`
+	b, _ := json.Marshal(recent)
+	_, recentOff, _ := l.Append(b)
+	l.Close()
+
+	f, _ := os.Open(logPath)
+	defer f.Close()
+	off, err := recentStart(f, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off > recentOff || recentOff-off > 128<<10 {
+		t.Fatalf("search started at %d; the recent entry is at %d", off, recentOff)
+	}
+	tracker, n, err := Rebuild(logPath, time.Hour)
+	if err != nil || n != 1 || tracker.Sessions() != 1 {
+		t.Fatalf("rebuilt %d calls, %d sessions, err %v", n, tracker.Sessions(), err)
+	}
+}
