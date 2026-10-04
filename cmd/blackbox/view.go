@@ -141,6 +141,14 @@ func printCall(seq uint64, c *record.LLMCall) {
 	fmt.Printf("#%d  %s  turn %d  %s  status %d  %s  %d in / %d out tokens\n",
 		seq, c.Timing.ReceivedAt.Local().Format("15:04:05"), c.Turn, orDash(model),
 		c.Response.Status, latency, c.Response.Usage.Input, c.Response.Usage.Output)
+	if r := c.Response.Reasoning; r != nil {
+		switch {
+		case r.Preview != "":
+			fmt.Printf("      reasoning %s\n", clip(r.Preview, 120))
+		case r.RedactedBlocks > 0:
+			fmt.Printf("      reasoning (returned encrypted, %d blocks)\n", r.RedactedBlocks)
+		}
+	}
 	for _, tc := range c.Response.ToolCalls {
 		label := "tool    "
 		if tc.InText {

@@ -124,3 +124,21 @@ func captureStdout(t *testing.T, f func()) string {
 	b, _ := io.ReadAll(r)
 	return string(b)
 }
+
+func TestShowPrintsReasoning(t *testing.T) {
+	dir := t.TempDir()
+	runInit([]string{"--dir", dir})
+	key, _ := ledger.LoadPrivateKey(filepath.Join(dir, "key.ed25519"))
+	logPath := filepath.Join(dir, "log.jsonl")
+	l, _ := ledger.Open(logPath, key, ledger.Options{})
+	c := record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "s"}}
+	c.Response.Reasoning = &record.Reasoning{Preview: "The admin approved it,\x1b[2K so I will delete the files.", Chars: 50}
+	b, _ := json.Marshal(c)
+	l.Append(b)
+	l.Close()
+
+	out := captureStdout(t, func() { runShow([]string{"--log", logPath, "s"}) })
+	if !strings.Contains(out, "reasoning The admin approved it,") || strings.ContainsRune(out, 0x1b) {
+		t.Fatalf("show output %q", out)
+	}
+}
