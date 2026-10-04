@@ -18,6 +18,7 @@ import (
 	"github.com/bkodzo/blackbox/internal/ledger"
 	"github.com/bkodzo/blackbox/internal/proxy"
 	"github.com/bkodzo/blackbox/internal/record"
+	"github.com/bkodzo/blackbox/internal/risk"
 )
 
 func TestEndToEnd(t *testing.T) {
@@ -173,5 +174,22 @@ func TestRebuildContinuesConversationsAcrossRestart(t *testing.T) {
 
 	if call.Turn != 2 || len(call.Anomalies) != 1 || call.Anomalies[0].Kind != record.AnomalyOrphanToolResult {
 		t.Fatalf("turn %d anomalies %+v", call.Turn, call.Anomalies)
+	}
+}
+
+func TestTextCallsAreFilteredWhenToolsAreOffered(t *testing.T) {
+	x := record.Exchange{
+		Call: &record.LLMCall{},
+		Req:  []byte(`{"messages":[],"tools":[{"function":{"name":"list_dir"}}]}`),
+		Resp: []byte(`{"choices":[{"message":{"content":"package.json is {\"name\":\"my-app\",\"input\":{\"x\":1}}; also {\"name\":\"rm\",\"parameters\":{\"path\":\"/\"}} and {\"name\":\"list_dir\",\"parameters\":{}}"}}]}`),
+	}
+	rm := risk.Map{"rm": {Risk: risk.High}}
+	call, _ := Enrich(x, "gw", rm)
+	var names []string
+	for _, tc := range call.Response.ToolCalls {
+		names = append(names, tc.Name)
+	}
+	if strings.Join(names, ",") != "rm,list_dir" {
+		t.Fatalf("text calls kept: %v", names)
 	}
 }

@@ -203,9 +203,22 @@ func Enrich(x record.Exchange, instanceID string, rm risk.Map) (*record.LLMCall,
 	for _, tc := range p.Response.ToolCalls {
 		add(tc, false)
 	}
-	for _, tc := range p.Response.TextToolCalls {
-		add(tc, true)
+	// A tool call written as text counts when no tools were offered (the
+	// agent parses replies itself), or when it names an offered tool or one
+	// in the risk map. This keeps JSON the model merely quotes, such as a
+	// config file, from being reported as a call.
+	offered := map[string]bool{}
+	for _, name := range p.Request.Tools {
+		offered[name] = true
 	}
+	kept := p.Response.TextToolCalls[:0:0]
+	for _, tc := range p.Response.TextToolCalls {
+		if len(offered) == 0 || offered[tc.Name] || rm.Lookup(tc.Name).Risk != risk.Unknown {
+			kept = append(kept, tc)
+			add(tc, true)
+		}
+	}
+	p.Response.TextToolCalls = kept
 	if rs.Stream != nil {
 		rs.Stream.Chunks = p.Response.Chunks
 	}
