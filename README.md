@@ -108,12 +108,8 @@ Anomalies are flags for review; blackbox never blocks a call.
 blackbox forwards any HTTP path and records the exact bytes of every exchange.
 It reads model names, token usage, and tool calls from the two common response
 shapes, streamed or not, and records anything else in full. Parsing, signing,
-and disk writes happen off the request path, so the gateway adds well under a
-millisecond to each call. To measure it on your own hardware:
-
-```
-go test -run '^$' -bench . ./internal/recorder ./internal/ledger
-```
+and disk writes happen off the request path, so agents are not kept waiting on
+them.
 
 [DESIGN.md](docs/DESIGN.md) explains the log format and the checks,
 [THREAT_MODEL.md](docs/THREAT_MODEL.md) what blackbox does and does not

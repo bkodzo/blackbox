@@ -245,26 +245,6 @@ are not valid UTF-8, so their SHA-256 can be recomputed from the log alone.
 Every turn stores the whole conversation, so storage grows with the square of
 a conversation's length; storing messages once by hash is planned.
 
-## Performance
-
-The request path only copies and hashes bytes; parsing, conversation checks,
-signing, and disk writes happen on the recorder goroutine. The benchmarks in
-`internal/recorder` and `internal/ledger` measure added latency per call,
-throughput through the gateway, the per-call recording cost, ledger appends
-with and without per-entry fsync, and verification speed:
-
-```
-go test -run '^$' -bench . ./internal/recorder ./internal/ledger
-```
-
-On one development laptop the gateway added roughly 0.2 ms per call over a
-loopback connection, recording cost roughly 0.1 ms per call off the request
-path, and verification ran at a few hundred MB/s. Treat these as indicative:
-they come from a single machine, a synthetic upstream, and loopback
-networking, and real numbers depend on hardware, disk, and payload size.
-Model calls usually take hundreds of milliseconds or more, so the overhead is
-small relative to an agent's run time.
-
 ## Not yet built
 
 - A web dashboard for auditors and managers.
