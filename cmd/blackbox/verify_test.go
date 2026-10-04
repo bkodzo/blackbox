@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bkodzo/blackbox/internal/ledger"
+	"github.com/bkodzo/blackbox/internal/record"
 )
 
 // logFixture writes a small signed log with a checkpoint and returns the
@@ -77,4 +80,47 @@ func TestSafeEscapesTerminalControls(t *testing.T) {
 	if got := clip("a\n\tb", 80); got != "a b" {
 		t.Fatalf("clip %q", got)
 	}
+}
+
+func TestCorruptCheckpointFileIsTampering(t *testing.T) {
+	logPath, cpPath, pubPath := logFixture(t)
+	b, _ := os.ReadFile(cpPath)
+	os.WriteFile(cpPath, []byte(strings.Replace(string(b), `"v":2`, `"v":2,"x":1`, 1)), 0o600)
+	if code := runVerify([]string{"--log", logPath, "--checkpoints", cpPath, "--pub", pubPath}); code != exitTampered {
+		t.Fatalf("exit %d", code)
+	}
+}
+
+func TestSessionsEscapesSessionIDs(t *testing.T) {
+	dir := t.TempDir()
+	runInit([]string{"--dir", dir})
+	key, _ := ledger.LoadPrivateKey(filepath.Join(dir, "key.ed25519"))
+	logPath := filepath.Join(dir, "log.jsonl")
+	l, _ := ledger.Open(logPath, key, ledger.Options{})
+	evil := "run" + string(rune(0x202e)) + "\x1b[2K"
+	rec, _ := json.Marshal(record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: evil}})
+	l.Append(rec)
+	l.Close()
+
+	out := captureStdout(t, func() { runSessions([]string{"--log", logPath}) })
+	for _, r := range out {
+		if r == 0x1b || isDirectionControl(r) {
+			t.Fatalf("control character %U in sessions output: %q", r, out)
+		}
+	}
+}
+
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	f()
+	os.Stdout = old
+	w.Close()
+	b, _ := io.ReadAll(r)
+	return string(b)
 }

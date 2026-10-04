@@ -27,10 +27,11 @@ func (e *VerifyError) Error() string {
 
 // Result summarizes a verification.
 type Result struct {
-	Entries     uint64
-	Head        string // hash of the last entry
-	LogID       string // hash of entry 1
-	Checkpoints int    // checkpoints matched against the log
+	Entries          uint64
+	Head             string // hash of the last entry
+	LogID            string // hash of entry 1
+	Checkpoints      int    // checkpointed entries matched against the log
+	CheckpointsTotal int    // distinct checkpointed entries
 	// Unterminated is set when the last entry is valid but lacks its newline.
 	// The gateway adds the newline on its next start.
 	Unterminated bool
@@ -67,7 +68,7 @@ func readCheckpoints(r io.Reader) ([]Checkpoint, int64, error) {
 		}
 		c, err := parseCheckpoint(bytes.TrimSuffix(line, []byte{'\n'}))
 		if err != nil {
-			return nil, 0, fmt.Errorf("checkpoint line %d: %w", n, err)
+			return nil, 0, &VerifyError{0, fmt.Sprintf("checkpoint line %d is not a valid checkpoint: %v", n, err)}
 		}
 		cps = append(cps, c)
 	}
@@ -86,21 +87,24 @@ const verifyBatch = 1024
 // reported.
 func Verify(r io.Reader, pub ed25519.PublicKey, cps []Checkpoint, visit func(Entry)) (Result, error) {
 	kid := KeyID(pub)
-	want := make(map[uint64]string, len(cps))
+	want := make(map[uint64]Checkpoint, len(cps))
 	var maxCP uint64
 	for _, c := range cps {
 		if err := c.verify(pub, kid); err != nil {
 			return Result{}, &VerifyError{0, err.Error()}
 		}
-		if h, ok := want[c.Seq]; ok && h != c.Hash {
-			return Result{}, &VerifyError{c.Seq,
-				"two signed checkpoints disagree about this entry: the log was rewritten after a checkpoint"}
+		if prev, ok := want[c.Seq]; ok && (prev.Hash != c.Hash || prev.Log != c.Log) {
+			if prev.Log != c.Log {
+				return Result{}, &VerifyError{0, "the checkpoints come from more than one log"}
+			}
+			return Result{}, &VerifyError{0, fmt.Sprintf(
+				"two signed checkpoints disagree about entry %d: the log was rewritten after a checkpoint", c.Seq)}
 		}
-		want[c.Seq] = c.Hash
+		want[c.Seq] = c
 		maxCP = max(maxCP, c.Seq)
 	}
+	res := Result{CheckpointsTotal: len(want)}
 
-	var res Result
 	prev := GenesisPrev
 	br := bufio.NewReaderSize(r, 1<<20)
 	batch := make([]Entry, 0, verifyBatch)
@@ -151,14 +155,17 @@ func Verify(r io.Reader, pub ed25519.PublicKey, cps []Checkpoint, visit func(Ent
 			if reasons[i] != "" {
 				return res, &VerifyError{e.Seq, reasons[i]}
 			}
-			if h, ok := want[e.Seq]; ok {
-				if h != e.Hash {
+			if e.Seq == 1 {
+				res.LogID = e.Hash
+			}
+			if c, ok := want[e.Seq]; ok {
+				if c.Log != res.LogID {
+					return res, &VerifyError{0, fmt.Sprintf("the checkpoint for entry %d belongs to a different log", e.Seq)}
+				}
+				if c.Hash != e.Hash {
 					return res, &VerifyError{e.Seq, "differs from a signed checkpoint (log was rewritten)"}
 				}
 				res.Checkpoints++
-			}
-			if e.Seq == 1 {
-				res.LogID = e.Hash
 			}
 			if visit != nil {
 				visit(e)

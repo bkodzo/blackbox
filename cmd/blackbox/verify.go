@@ -45,6 +45,13 @@ func runVerify(args []string) int {
 		return failCode(exitError, "%v", err)
 	}
 	cps, cpTorn, err := ledger.ReadCheckpoints(*cpPath)
+	var cpErr *ledger.VerifyError
+	if errors.As(err, &cpErr) {
+		// A checkpoint line that does not parse was altered: that is a verdict,
+		// not an I/O problem.
+		fmt.Printf("Checkpoints:  %s\n\nResult: TAMPERED\n  %s\n", *cpPath, cpErr.Error())
+		return exitTampered
+	}
 	if err != nil {
 		return failCode(exitError, "%v", err)
 	}
@@ -92,13 +99,13 @@ func runVerify(args []string) int {
 	fmt.Printf("Log:          %s\n", *logPath)
 	fmt.Printf("Signing key:  %s\n", ledger.Fingerprint(pub))
 	fmt.Printf("Entries:      %d checked (%d model calls)\n", res.Entries, calls)
-	fmt.Printf("Checkpoints:  %d of %d matched\n", res.Checkpoints, len(cps))
+	fmt.Printf("Checkpoints:  %d of %d matched\n", res.Checkpoints, res.CheckpointsTotal)
 
 	var ve *ledger.VerifyError
 	if errors.As(err, &ve) {
 		fmt.Printf("\nResult: TAMPERED\n  %s\n", ve.Error())
-		if ve.Seq > 1 {
-			fmt.Printf("  Entries 1 to %d are intact.\n", ve.Seq-1)
+		if res.Entries > 0 {
+			fmt.Printf("  Entries 1 to %d were checked and are intact.\n", res.Entries)
 		}
 		return exitTampered
 	}

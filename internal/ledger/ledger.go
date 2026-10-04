@@ -45,6 +45,10 @@ type Options struct {
 	CheckpointPath     string
 	CheckpointRecords  uint64        // default 1000
 	CheckpointInterval time.Duration // default 5m
+	// OnFailure, if set, is called once, from its own goroutine, when a write
+	// or fsync fails and the ledger stops accepting appends.
+	OnFailure func(error)
+
 	// CheckpointMirror, if set, also receives every checkpoint line, so a copy
 	// can live outside this machine. It is written from its own goroutine and
 	// never blocks the ledger; lines are dropped (and counted) if it falls behind.
@@ -510,6 +514,9 @@ func (l *Ledger) fail(op string, err error) error {
 	defer l.mu.Unlock()
 	if l.err == nil {
 		l.err = fmt.Errorf("ledger: %s failed: %w", op, err)
+		if l.opt.OnFailure != nil {
+			go l.opt.OnFailure(l.err)
+		}
 	}
 	l.drained.Broadcast()
 	return l.err

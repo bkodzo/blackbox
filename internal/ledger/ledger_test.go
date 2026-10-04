@@ -253,7 +253,7 @@ func TestDetectsRewriteAfterCheckpoint(t *testing.T) {
 	os.WriteFile(f.cps, append(shipped, local...), 0o600)
 
 	_, err := f.verify(t)
-	wantTampered(t, err, 5, "disagree")
+	wantTampered(t, err, 0, "disagree about entry 5")
 }
 
 func TestDetectsTamperedCheckpointFields(t *testing.T) {
@@ -399,11 +399,17 @@ func TestConcurrentAppendsWithBackPressure(t *testing.T) {
 
 func TestWriteFailureIsSticky(t *testing.T) {
 	f := newFixture(t)
-	l := f.open(t, Options{FlushInterval: 1 << 40}) // no background flushes
+	failures := make(chan error, 1)
+	l := f.open(t, Options{FlushInterval: 1 << 40, OnFailure: func(err error) { failures <- err }}) // no background flushes
 	l.Append([]byte(`{"i":1}`))
 	l.f.Close() // make the next write fail
 	if err := l.flush(false); err == nil {
 		t.Fatal("flush succeeded on a closed file")
+	}
+	select {
+	case <-failures:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnFailure was not called")
 	}
 	if l.Err() == nil {
 		t.Fatal("Err() is nil after a failed write")
