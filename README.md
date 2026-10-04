@@ -122,8 +122,9 @@ protect against.
 | Anomaly | Meaning |
 |---|---|
 | `orphan_tool_result` | The agent returned a result for a tool call the model never made |
+| `duplicate_tool_result` | The agent returned another result for a call already answered |
 | `unverifiable_tool_result` | A tool result arrived with no earlier turn to check it against |
-| `history_rewritten` | An earlier message, or the model's tool calls or text, changed between turns |
+| `history_rewritten` | Earlier messages, the model's calls or text, or what is attributed to the model changed between turns |
 | `history_truncated` | Older messages were dropped |
 | `toolset_changed` | The tools offered to the model changed mid-session |
 | `system_prompt_changed` | The system prompt changed mid-session |
@@ -131,6 +132,7 @@ protect against.
 | `stream_aborted` | The client disconnected before the response finished |
 | `high_risk_tool` | The model requested a tool marked high risk in the risk map |
 | `tool_call_in_text` | The model wrote a tool call into its reply text instead of making one |
+| `text_tool_call_executed` | The agent ran a call the model only wrote as text |
 
 Conversations are tracked with or without the session header, and survive a
 gateway restart. Anomalies are flags for review; blackbox never blocks a call.
@@ -167,12 +169,13 @@ override the file.
 | `--upstream` | required | Base URL of the model server |
 | `--listen` | `127.0.0.1:8080` | Address to listen on |
 | `--log` | `blackbox.jsonl` | Audit log |
-| `--checkpoints` | `blackbox.checkpoints.jsonl` | Checkpoint file |
+| `--checkpoints` | `blackbox.checkpoints.jsonl` | Checkpoint file (required) |
 | `--key` | `~/.blackbox/key.ed25519` | Private signing key |
 | `--risk` | none | Risk map (see [examples/risk.json](examples/risk.json)) |
 | `--sync` | `group` | `group` or `always` |
 | `--max-body` | 32 MiB | Bytes of each body stored; hashes always cover everything |
 | `--max-request` | 64 MiB | Larger requests are refused with 413 and recorded |
+| `--max-in-flight` | `64` | Requests handled at once; more are refused with 503 and recorded |
 | `--checkpoint-stdout` | `true` | Also print checkpoints to stdout |
 | `--fail-open` | `false` | Keep forwarding if the log fails (default: refuse and exit) |
 | `--body-read-timeout` | `1m` | Limit for reading a request body |

@@ -57,8 +57,11 @@ key rotation.
 
 The envelope is written by hand around the record bytes. On read, an entry is
 accepted only if re-encoding its parsed fields reproduces the line byte for
-byte. This rejects duplicate keys, differently cased keys, escaped keys, extra
-fields, added whitespace, uppercase hex, and padded base64. Without this rule,
+byte, every hash and key ID is lowercase hex of the exact length, and the
+signature is strict standard base64. This rejects duplicate keys, differently
+cased keys, escaped keys, extra fields, added whitespace, uppercase hex, and
+alternative base64 encodings. Checkpoints are held to the same rules, and their
+time must be a canonical RFC 3339 UTC timestamp. Without this rule,
 a line could pass verification while other JSON parsers, such as `jq` or a
 dashboard, read different content from it.
 
@@ -76,7 +79,9 @@ because what remains is still a valid, signed prefix. Checkpoints cover that.
 
 After a durable flush, at most every 1,000 entries or 5 minutes, the ledger
 writes a checkpoint to a separate file and, by default, to stdout so a copy
-leaves the machine:
+leaves the machine. The stdout copy is written from its own goroutine; if the
+reader stalls or the pipe closes, lines are counted as dropped and shutdown
+waits at most two seconds for it. The checkpoint file always has every line.
 
 ```
 {"v":2,"log":"<hash of entry 1>","seq":42,"hash":"<hex>","ts":"<time>","kid":"<key id>","sig":"<base64>"}
@@ -92,7 +97,9 @@ can be altered. Verification treats these as tampering:
 - a checkpoint names a different log.
 
 The gateway also refuses to start on a log that is shorter than, or disagrees
-with, its own latest checkpoint, so it never extends a chain over a gap.
+with, its own latest checkpoint, so it never extends a chain over a gap. These
+checks run before any crash repair, so a log that is refused is left exactly as
+it was found. A checkpoint file is required.
 
 ### Durability and group commit
 
@@ -138,12 +145,15 @@ cores, and reports the first problem in log order. Exit codes are distinct:
 
 ### Fail closed
 
-If a record cannot be written (disk full, I/O error), the ledger stops
-accepting appends, the proxy refuses new requests with 503, the health
-endpoint reports the failure, and the gateway shuts down with a non-zero exit
-code so a supervisor notices. Agents are never served unrecorded. `--fail-open`
+If a record cannot be written (disk full, I/O error), whether by the recorder
+or by a background flush, the ledger stops accepting appends, the proxy refuses
+new requests with 503, the health endpoint reports the failure, calls in flight
+are cancelled at once, and the gateway exits with a non-zero code so a
+supervisor notices. A call that was already being served when the failure
+happened can finish its response unrecorded; no new call starts. `--fail-open`
 keeps forwarding instead, for deployments that prefer availability; the gap is
-then visible as missing records and an unclean stop.
+then visible as missing records and an unclean stop. The `gateway_start`
+entry is on disk before the first request is served.
 
 ### Shutdown
 
@@ -158,6 +168,7 @@ calls that could not be recorded, and calls cancelled.
 
 | Limit | Default | Why |
 |---|---|---|
+| Requests in flight | 64 | More get 503 and are recorded as refused; bounds memory to about 64 x (64 + 32) MiB |
 | Request size | 64 MiB | Larger requests get 413 and are recorded as refused |
 | Stored body size | 32 MiB | Bodies beyond this are truncated in the log; hashes cover every byte |
 | Request body read | 1 minute | A slow client cannot hold a request open indefinitely |
@@ -192,24 +203,36 @@ without it are grouped by conversation: a hash of the opening messages, plus
 the rule that a request continues a conversation if the previous request's
 messages are a prefix of it. Retries and parallel runs of the same task become
 separate branches. State for the last hour is rebuilt from the log at startup,
-so a restart does not reset the checks.
+so a restart does not reset the checks; the start of that hour is found by
+binary search, so the cost does not grow with the size of the log.
 
 For each call the tracker checks that:
 
 - the history sent last turn is sent again unchanged, or with older turns
-  dropped (`history_truncated`), and not otherwise changed
-  (`history_rewritten`);
-- the reply the agent echoes back contains exactly the tool calls the model
-  returned, with the same names and arguments, and the same text
-  (`history_rewritten`);
+  dropped while keeping the opening (`history_truncated`), and not otherwise
+  changed (`history_rewritten`). Without a session ID, a request that diverges
+  from every known branch is checked against the closest one;
+- the messages added since the last turn contain exactly one model message,
+  the echo of the model's last reply, placed first; results sent without it,
+  messages placed before it, or further messages attributed to the model are
+  flagged (`history_rewritten`);
+- the echo contains exactly the tool calls the model returned, with the same
+  names and canonical arguments, and the same text (`history_rewritten`);
 - every new tool result answers a call the model made in this conversation
-  (`orphan_tool_result`), and links it to the entry where the call was made;
-  results with no earlier turn to check against are flagged as
+  (`orphan_tool_result`) and has not been answered before
+  (`duplicate_tool_result`), and is linked to the entry where the call was
+  made; results with no earlier turn to check against are flagged as
   `unverifiable_tool_result` rather than trusted;
 - the tools and leading system prompt have not changed.
 
 Servers that return tool calls without IDs are handled by matching the agent's
-echoed calls by name and arguments and adopting the IDs the agent assigned.
+echoed calls by name and arguments and adopting the IDs the agent assigned. An
+agent that runs a call the model only wrote as text is allowed when the model
+made no real calls, and flagged as `text_tool_call_executed`.
+
+Tracked state is bounded: at most 32 branches per conversation opening and
+10,000 conversations in total, evicting the least recently used. Numbers in
+arguments are compared by value, so `1.0` and `1` are equal.
 
 Single-call checks cover model substitution (a served name must equal the
 requested one or add only a version suffix), aborted streams, high-risk tools,

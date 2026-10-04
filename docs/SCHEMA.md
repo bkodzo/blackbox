@@ -109,7 +109,7 @@ making it. The agent may not have run it.
 
 | Field | Meaning |
 |---|---|
-| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, `client_aborted`, `gateway_shutdown`, or `request_too_large` |
+| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, `client_aborted`, `gateway_shutdown`, `request_too_large`, or `gateway_busy` |
 | `error.message` | Detail |
 | `timing.received_at` | Request received by the gateway |
 | `timing.upstream_sent_at` | Request sent to the model server |
@@ -141,7 +141,9 @@ All times are RFC 3339 in UTC.
 |---|---|
 | `orphan_tool_result` | A tool result answers a call the model never made in this conversation |
 | `unverifiable_tool_result` | A tool result arrived with no earlier turn to check it against |
-| `history_rewritten` | An earlier message, or the model's tool calls or reply text, changed between turns |
+| `duplicate_tool_result` | Another result arrived for a tool call that was already answered |
+| `text_tool_call_executed` | The agent ran a call the model only wrote as text |
+| `history_rewritten` | An earlier message, or the model's tool calls or reply text, changed or was left out; or messages were attributed to the model that it never sent |
 | `history_truncated` | Older messages were dropped since the previous turn |
 | `toolset_changed` | The tools offered changed since the previous turn |
 | `system_prompt_changed` | The system prompt changed since the previous turn |

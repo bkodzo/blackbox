@@ -49,12 +49,16 @@ blackbox sees the full conversation on every call, so it can notice when an
 agent, or something that has taken control of it, misrepresents what happened:
 
 - tool results for calls the model never made (`orphan_tool_result`), as in a
-  prompt injection that fakes an approval;
+  prompt injection that fakes an approval, or for calls already answered
+  (`duplicate_tool_result`);
 - tool results that cannot be checked because no earlier turn was seen
   (`unverifiable_tool_result`);
 - earlier messages, the model's tool calls (including their arguments), or the
-  model's reply text changed between turns (`history_rewritten`), or older turns
-  dropped (`history_truncated`);
+  model's reply text changed or left out between turns, replies attributed to
+  the model that it never sent, or messages placed ahead of its reply
+  (`history_rewritten`), or older turns dropped (`history_truncated`);
+- calls the model only wrote as text that the agent then ran
+  (`text_tool_call_executed`);
 - tools or the system prompt changed mid-conversation;
 - a different model answering than the one requested;
 - high-risk tools requested, including tool calls the model wrote as text.
@@ -101,7 +105,11 @@ rebuilt from the log after a restart. These are flags for review, not blocks.
   current 50 ms write batch. The loss is flagged at the next start. `--sync
   always` removes the batch window but not the queue.
 - **Fail-open mode.** With `--fail-open`, traffic continues after the log fails
-  and is not recorded.
+  and is not recorded. In the default mode, a call already being answered when
+  the log fails can finish its response unrecorded; no new call is forwarded.
+- **Few-shot examples.** A conversation the gateway has never seen may open with
+  example model replies written by the agent. These are not flagged, since they
+  cannot be told apart from a conversation that began before the gateway.
 - **Confidentiality.** The log contains full prompts and responses in plain
   text. It is created with owner-only permissions but is not encrypted.
 - **Detection heuristics.** Tool calls written as text are found by pattern and

@@ -13,8 +13,8 @@ First release.
   of logs rewritten after a checkpoint, and of forged checkpoints.
 - Crash recovery that never discards log bytes: a complete final entry is
   kept, and an interrupted write is moved to a quarantine file and recorded.
-- Fails closed: if the log cannot be written, requests are refused and the
-  gateway exits. `--fail-open` is available.
+- Fails closed: if the log cannot be written, new requests are refused, calls
+  in flight are cancelled, and the gateway exits. `--fail-open` is available.
 - Group commit with bounded buffers, a byte-bounded recording queue, request
   size limits, read and upstream timeouts, and a shutdown that records calls
   cancelled at the end of the grace period.
@@ -23,10 +23,11 @@ First release.
 - Extraction of model, token usage, tool calls, and system prompt and tool
   hashes from the two common response shapes, streamed or not.
 - Conversation tracking with or without a session header, rebuilt from the log
-  at startup, with anomaly flags: orphan and unverifiable tool results,
-  rewritten or truncated history (including changed tool call arguments and
-  reply text), changed tools or system prompt, model substitution, aborted
-  streams, high-risk tools, and tool calls written as text.
+  at startup, with anomaly flags: orphan, duplicate, and unverifiable tool
+  results, rewritten or truncated history (including changed tool call
+  arguments, reply text, and replies attributed to the model that it never
+  sent), changed tools or system prompt, model substitution, aborted streams,
+  high-risk tools, and tool calls written as text or run from text.
 - Risk map for classifying tools by level and category.
 - `blackbox init`, `serve`, `sessions`, and `show` commands, with escaping of
   terminal control characters in recorded text.
