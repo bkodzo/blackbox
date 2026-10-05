@@ -310,7 +310,7 @@ func TestProtocolUpgradePassesThrough(t *testing.T) {
 	defer up.Close()
 	h := &harness{caps: make(chan record.Exchange, 1)}
 	u, _ := url.Parse(up.URL)
-	h.srv = httptest.NewServer(New(Config{Upstream: u, Sink: func(c record.Exchange) { h.caps <- c }}))
+	h.srv = httptest.NewServer(New(Config{Upstream: u, AllowUpgrades: true, Sink: func(c record.Exchange) { h.caps <- c }}))
 	defer h.srv.Close()
 
 	conn, err := net.Dial("tcp", strings.TrimPrefix(h.srv.URL, "http://"))
@@ -363,7 +363,7 @@ func TestShutdownCancellationIsRecorded(t *testing.T) {
 	}()
 	<-started
 	cancel(ErrShutdown)
-	p.Wait()
+	p.Close()
 	c := (<-caps).Call
 	if c.Error == nil || c.Error.Class != record.ErrorGatewayShutdown || p.Aborted() != 1 {
 		t.Fatalf("error %+v aborted %d", c.Error, p.Aborted())
@@ -404,4 +404,107 @@ func TestRequestsBeyondTheLimitAreRefusedAndRecorded(t *testing.T) {
 	}
 	close(release)
 	<-first
+}
+
+func TestUpgradesAreRefusedByDefault(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("an upgrade request reached the upstream")
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	caps := make(chan record.Exchange, 1)
+	srv := httptest.NewServer(New(Config{Upstream: u, Sink: func(c record.Exchange) { caps <- c }}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/realtime", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if c := (<-caps).Call; c.Error == nil || c.Error.Class != record.ErrorUpgradeRefused {
+		t.Fatalf("recorded as %+v", c.Error)
+	}
+}
+
+func TestStalledUpstreamIsCancelledAndRecorded(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: one\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done() // then nothing more
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	caps := make(chan record.Exchange, 1)
+	srv := httptest.NewServer(New(Config{Upstream: u, StreamIdle: 200 * time.Millisecond, Sink: func(c record.Exchange) { caps <- c }}))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	select {
+	case c := <-caps:
+		if c.Call.Error == nil || c.Call.Error.Class != record.ErrorStreamIdle {
+			t.Fatalf("recorded as %+v", c.Call.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled stream was never cancelled")
+	}
+}
+
+func TestClientThatStopsReadingFreesItsSlot(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := strings.Repeat("x", 64<<10)
+		for {
+			if _, err := io.WriteString(w, "data: "+chunk+"\n\n"); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	caps := make(chan record.Exchange, 1)
+	srv := httptest.NewServer(New(Config{Upstream: u, StreamIdle: 300 * time.Millisecond, MaxBody: 1 << 20, Sink: func(c record.Exchange) { caps <- c }}))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() // never read
+	select {
+	case c := <-caps:
+		if c.Call.Error == nil || c.Call.Response.Stream == nil || c.Call.Response.Stream.Outcome != record.StreamClientAborted {
+			t.Fatalf("recorded as %+v %+v", c.Call.Error, c.Call.Response.Stream)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("a client that stopped reading held its slot")
+	}
+}
+
+func TestRequestsAfterCloseAreRefused(t *testing.T) {
+	u, _ := url.Parse("http://127.0.0.1:1")
+	p := New(Config{Upstream: u})
+	p.Close()
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/x", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
 }

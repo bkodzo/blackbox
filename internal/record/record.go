@@ -28,6 +28,9 @@ type GatewayStart struct {
 	QuarantinedBytes int64  `json:"quarantined_bytes,omitempty"`
 	QuarantineFile   string `json:"quarantine_file,omitempty"`
 	QuarantineSHA256 string `json:"quarantine_sha256,omitempty"`
+	// CheckpointTornBytes counts bytes of an incomplete final checkpoint line
+	// removed at startup.
+	CheckpointTornBytes int64 `json:"checkpoint_torn_bytes,omitempty"`
 }
 
 // GatewayStop is written on clean shutdown.
@@ -198,6 +201,8 @@ const (
 	ErrorGatewayShutdown     = "gateway_shutdown"
 	ErrorRequestTooLarge     = "request_too_large"
 	ErrorGatewayBusy         = "gateway_busy"
+	ErrorUpgradeRefused      = "upgrade_refused"
+	ErrorStreamIdle          = "stream_idle"
 )
 
 type Error struct {

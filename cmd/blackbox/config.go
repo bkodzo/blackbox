@@ -50,6 +50,10 @@ type config struct {
 	MaxBody         int64    `json:"max_body_bytes"`
 	MaxRequest      int64    `json:"max_request_bytes"`
 	MaxInFlight     int      `json:"max_in_flight"`
+	AllowUpgrades   bool     `json:"allow_upgrades"`
+	CheckpointEvery uint64   `json:"checkpoint_records"`
+	CheckpointAfter duration `json:"checkpoint_interval"`
+	StreamIdle      duration `json:"stream_idle_timeout"`
 	MirrorCPs       bool     `json:"checkpoint_stdout"`
 	FailOpen        bool     `json:"fail_open"`
 	BodyReadTimeout duration `json:"body_read_timeout"`
@@ -67,6 +71,9 @@ func defaultConfig() config {
 		MaxBody:         32 << 20,
 		MaxRequest:      64 << 20,
 		MaxInFlight:     64,
+		CheckpointEvery: 100,
+		CheckpointAfter: duration(30 * time.Second),
+		StreamIdle:      duration(5 * time.Minute),
 		MirrorCPs:       true,
 		BodyReadTimeout: duration(time.Minute),
 		UpstreamTimeout: duration(10 * time.Minute),
@@ -95,6 +102,10 @@ func serveFlags(fs *flag.FlagSet, f *config) *string {
 	fs.Int64Var(&f.MaxBody, "max-body", 0, "bytes of each body to store (default 32 MiB); hashes always cover all bytes")
 	fs.Int64Var(&f.MaxRequest, "max-request", 0, "largest request accepted (default 64 MiB); larger ones get 413")
 	fs.IntVar(&f.MaxInFlight, "max-in-flight", 0, "requests handled at once (default 64); more get 503")
+	fs.BoolVar(&f.AllowUpgrades, "allow-upgrades", false, "allow protocol upgrades, whose traffic is not recorded (default: refuse with 501)")
+	fs.Uint64Var(&f.CheckpointEvery, "checkpoint-records", 0, "write a checkpoint at least every this many entries (default 100)")
+	fs.Var(&f.CheckpointAfter, "checkpoint-interval", "write a checkpoint at least this often while entries are written (default 30s)")
+	fs.Var(&f.StreamIdle, "stream-idle-timeout", "cancel a response that makes no progress for this long (default 5m)")
 	fs.BoolVar(&f.MirrorCPs, "checkpoint-stdout", true, "also print each checkpoint to stdout")
 	fs.BoolVar(&f.FailOpen, "fail-open", false, "keep forwarding traffic if the audit log fails (default: refuse with 503 and exit)")
 	fs.Var(&f.BodyReadTimeout, "body-read-timeout", "limit for reading a request body (default 1m)")
@@ -146,6 +157,14 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 			c.MaxRequest = flags.MaxRequest
 		case "max-in-flight":
 			c.MaxInFlight = flags.MaxInFlight
+		case "allow-upgrades":
+			c.AllowUpgrades = flags.AllowUpgrades
+		case "checkpoint-records":
+			c.CheckpointEvery = flags.CheckpointEvery
+		case "checkpoint-interval":
+			c.CheckpointAfter = flags.CheckpointAfter
+		case "stream-idle-timeout":
+			c.StreamIdle = flags.StreamIdle
 		case "checkpoint-stdout":
 			c.MirrorCPs = flags.MirrorCPs
 		case "fail-open":
@@ -167,8 +186,10 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 		return c, errors.New(`sync must be "group" or "always"`)
 	case c.MaxBody <= 0 || c.MaxRequest <= 0 || c.MaxInFlight <= 0:
 		return c, errors.New("body, request, and in-flight limits must be positive")
-	case c.BodyReadTimeout <= 0 || c.UpstreamTimeout <= 0 || c.ShutdownTimeout <= 0:
-		return c, errors.New("timeouts must be positive")
+	case c.BodyReadTimeout <= 0 || c.UpstreamTimeout <= 0 || c.ShutdownTimeout <= 0 || c.StreamIdle <= 0 || c.CheckpointAfter <= 0:
+		return c, errors.New("timeouts and intervals must be positive")
+	case c.CheckpointEvery == 0:
+		return c, errors.New("checkpoint records must be positive")
 	}
 	return c, nil
 }

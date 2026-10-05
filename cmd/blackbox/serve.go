@@ -105,7 +105,13 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		default:
 		}
 	}
-	opt := ledger.Options{Sync: cfg.Sync == "always", CheckpointPath: cfg.Checkpoints, OnFailure: onFailure}
+	opt := ledger.Options{
+		Sync:               cfg.Sync == "always",
+		CheckpointPath:     cfg.Checkpoints,
+		CheckpointRecords:  cfg.CheckpointEvery,
+		CheckpointInterval: time.Duration(cfg.CheckpointAfter),
+		OnFailure:          onFailure,
+	}
 	if cfg.MirrorCPs {
 		opt.CheckpointMirror = stdout
 	}
@@ -129,6 +135,8 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		QuarantinedBytes: recovery.QuarantinedBytes,
 		QuarantineFile:   recovery.QuarantineFile,
 		QuarantineSHA256: recovery.QuarantineSHA256,
+
+		CheckpointTornBytes: recovery.CheckpointTornBytes,
 	}
 	// gateway_start, with any recovery it describes, is on disk before the
 	// first request is served.
@@ -176,6 +184,8 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		MaxBody:         cfg.MaxBody,
 		MaxRequest:      cfg.MaxRequest,
 		MaxInFlight:     cfg.MaxInFlight,
+		StreamIdle:      time.Duration(cfg.StreamIdle),
+		AllowUpgrades:   cfg.AllowUpgrades,
 		BodyReadTimeout: time.Duration(cfg.BodyReadTimeout),
 		UpstreamTimeout: time.Duration(cfg.UpstreamTimeout),
 	})
@@ -240,7 +250,8 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		log.Printf("grace period ended with calls still in flight; cancelling them")
 	}
 	cancelBase(proxy.ErrShutdown)
-	px.Wait()
+	srv.Close() // closes connections Shutdown left open, so no request arrives late
+	px.Close()  // refuses anything that still does, and waits for calls in flight
 	rec.Close()
 
 	stopRec := record.GatewayStop{

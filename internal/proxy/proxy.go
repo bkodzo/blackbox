@@ -47,11 +47,16 @@ const (
 	DefaultBodyReadTimeout = time.Minute
 	DefaultUpstreamTimeout = 10 * time.Minute
 	DefaultMaxInFlight     = 64
+	DefaultStreamIdle      = 5 * time.Minute
 )
 
 // ErrShutdown is the cancellation cause the gateway uses for calls still in
 // flight when its shutdown grace period ends.
 var ErrShutdown = errors.New("gateway shutting down")
+
+// errStreamIdle cancels a call whose response made no progress for the
+// stream idle limit.
+var errStreamIdle = errors.New("the response made no progress")
 
 // Config configures a Proxy.
 type Config struct {
@@ -70,7 +75,15 @@ type Config struct {
 	MaxInFlight     int
 	BodyReadTimeout time.Duration // limit for reading a request body
 	UpstreamTimeout time.Duration // limit for the upstream's response headers
-	Transport       http.RoundTripper
+	// StreamIdle bounds how long a response may go without progress in
+	// either direction, the upstream sending nothing or the client reading
+	// nothing. The call is then cancelled and recorded, freeing its slot.
+	StreamIdle time.Duration
+	// AllowUpgrades lets requests switch protocols (to a WebSocket, for
+	// example). Traffic after a switch is passed through but not recorded, so
+	// upgrades are refused unless this is set.
+	AllowUpgrades bool
+	Transport     http.RoundTripper
 }
 
 // Proxy is an http.Handler that forwards every request to Config.Upstream.
@@ -78,6 +91,8 @@ type Proxy struct {
 	cfg      Config
 	rp       *httputil.ReverseProxy
 	slots    chan struct{}
+	mu       sync.Mutex // guards closing, and inflight.Add against Close
+	closing  bool
 	inflight sync.WaitGroup
 	aborted  atomic.Uint64
 }
@@ -100,6 +115,9 @@ func New(cfg Config) *Proxy {
 	}
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = DefaultMaxInFlight
+	}
+	if cfg.StreamIdle <= 0 {
+		cfg.StreamIdle = DefaultStreamIdle
 	}
 	base := cfg.Transport
 	if base == nil {
@@ -126,9 +144,14 @@ func New(cfg Config) *Proxy {
 	return p
 }
 
-// Wait blocks until every request being handled has finished and been
-// handed to the sink.
-func (p *Proxy) Wait() { p.inflight.Wait() }
+// Close refuses new requests, then waits until every request being handled
+// has finished and been handed to the sink.
+func (p *Proxy) Close() {
+	p.mu.Lock()
+	p.closing = true
+	p.mu.Unlock()
+	p.inflight.Wait()
+}
 
 // Aborted reports calls cancelled with ErrShutdown.
 func (p *Proxy) Aborted() uint64 { return p.aborted.Load() }
@@ -136,11 +159,21 @@ func (p *Proxy) Aborted() uint64 { return p.aborted.Load() }
 // exchange is the per-request state. All access happens on the handler
 // goroutine (ReverseProxy calls hooks and reads the body there).
 type exchange struct {
-	call *record.LLMCall
-	req  []byte
-	resp *capture
-	sse  bool
-	span string
+	call  *record.LLMCall
+	req   []byte
+	resp  *capture
+	sse   bool
+	span  string
+	ctx   context.Context // the call's context; its cause says why it ended early
+	rc    *http.ResponseController
+	idle  time.Duration
+	timer *time.Timer // cancels the call when the response stalls
+}
+
+// progress pushes back the idle limits after the response moved.
+func (ex *exchange) progress() {
+	ex.timer.Reset(ex.idle)
+	ex.rc.SetWriteDeadline(time.Now().Add(ex.idle)) // writers without deadlines skip this
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -153,11 +186,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	p.mu.Lock()
+	if p.closing {
+		p.mu.Unlock()
+		http.Error(w, "blackbox: the gateway is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 	p.inflight.Add(1)
+	p.mu.Unlock()
 	defer p.inflight.Done()
 
 	received := time.Now().UTC()
-	ex := &exchange{call: newCall(r, p.cfg.Upstream, received), span: randomHex(8)}
+	ctx, cancel := context.WithCancelCause(r.Context())
+	defer cancel(nil)
+	ex := &exchange{call: newCall(r, p.cfg.Upstream, received), span: randomHex(8),
+		ctx: ctx, rc: http.NewResponseController(w), idle: p.cfg.StreamIdle}
+	ex.timer = time.AfterFunc(ex.idle, func() { cancel(errStreamIdle) })
+	ex.timer.Stop() // armed once the response starts
+	defer ex.timer.Stop()
 	ex.call.Trace = trace(r.Header.Get("Traceparent"), ex.span)
 
 	select {
@@ -167,7 +213,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ex.call.Error = &record.Error{Class: record.ErrorGatewayBusy, Message: "too many requests in flight"}
 		ex.call.Response.Status = http.StatusServiceUnavailable
 		http.Error(w, "blackbox: too many requests in flight", http.StatusServiceUnavailable)
-		p.finish(ex, r)
+		p.finish(ex, false)
 		return
 	}
 
@@ -184,11 +230,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ex.call.Error = &record.Error{Class: class, Message: err.Error()}
 		ex.call.Response.Status = status
 		http.Error(w, "blackbox: reading request body: "+err.Error(), status)
-		p.finish(ex, r)
+		p.finish(ex, false)
+		return
+	}
+	if r.Header.Get("Upgrade") != "" && !p.cfg.AllowUpgrades {
+		ex.call.Error = &record.Error{Class: record.ErrorUpgradeRefused,
+			Message: "protocol upgrades are refused, since traffic after one cannot be recorded"}
+		ex.call.Response.Status = http.StatusNotImplemented
+		http.Error(w, "blackbox: protocol upgrades are not allowed", http.StatusNotImplemented)
+		p.finish(ex, false)
 		return
 	}
 
-	out := r.WithContext(context.WithValue(r.Context(), ctxKey{}, ex))
+	out := r.WithContext(context.WithValue(ctx, ctxKey{}, ex))
 	out.Body = io.NopCloser(bytes.NewReader(reqBody))
 	out.ContentLength = int64(len(reqBody))
 
@@ -196,7 +250,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// ReverseProxy panics with http.ErrAbortHandler when a copy fails
 		// mid-response. Record the exchange before letting it propagate.
 		v := recover()
-		p.finish(ex, r)
+		p.finish(ex, v != nil)
 		if v != nil {
 			panic(v)
 		}
@@ -265,8 +319,9 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		return nil
 	}
 	ex.sse = strings.HasPrefix(c.Response.ContentType, "text/event-stream")
-	ex.resp = &capture{rc: resp.Body, h: sha256.New(), max: p.cfg.MaxBody}
+	ex.resp = &capture{rc: resp.Body, h: sha256.New(), max: p.cfg.MaxBody, progress: ex.progress}
 	resp.Body = ex.resp
+	ex.progress() // arm the idle limits for the response
 	return nil
 }
 
@@ -277,22 +332,26 @@ func (p *Proxy) errorHandler(w http.ResponseWriter, r *http.Request, err error) 
 	w.WriteHeader(http.StatusBadGateway)
 }
 
-// abortClass explains a failure: the gateway shutting down, the client
-// leaving, or otherwise def.
+// abortClass explains a failure: the gateway shutting down, the response
+// stalling, the client leaving, or otherwise def.
 func abortClass(ctx context.Context, def string) string {
 	switch {
 	case errors.Is(context.Cause(ctx), ErrShutdown):
 		return record.ErrorGatewayShutdown
+	case errors.Is(context.Cause(ctx), errStreamIdle):
+		return record.ErrorStreamIdle
 	case ctx.Err() != nil:
 		return record.ErrorClientAborted
 	}
 	return def
 }
 
-func (p *Proxy) finish(ex *exchange, r *http.Request) {
+// finish records the exchange. aborted is set when copying the response
+// failed (for example a client that stopped reading).
+func (p *Proxy) finish(ex *exchange, aborted bool) {
 	c := ex.call
 	c.Timing.CompletedAt = time.Now().UTC()
-	if errors.Is(context.Cause(r.Context()), ErrShutdown) {
+	if errors.Is(context.Cause(ex.ctx), ErrShutdown) {
 		p.aborted.Add(1)
 	}
 	if rc := ex.resp; rc != nil {
@@ -300,11 +359,14 @@ func (p *Proxy) finish(ex *exchange, r *http.Request) {
 		c.Response.Body = makeBody(rc.buf.Bytes(), rc.n, hex.EncodeToString(rc.h.Sum(nil)), p.cfg.MaxBody)
 		outcome := record.StreamCompleted
 		switch {
-		case !rc.eof && r.Context().Err() != nil:
+		case !rc.eof && (ex.ctx.Err() != nil || aborted):
 			outcome = record.StreamClientAborted
 			if c.Error == nil {
-				c.Error = &record.Error{Class: abortClass(r.Context(), record.ErrorClientAborted),
-					Message: "the exchange ended before the response finished"}
+				msg := "the exchange ended before the response finished"
+				if ex.ctx.Err() == nil {
+					msg = "the client stopped reading the response"
+				}
+				c.Error = &record.Error{Class: abortClass(ex.ctx, record.ErrorClientAborted), Message: msg}
 			}
 		case rc.err != nil:
 			outcome = record.StreamUpstreamError
@@ -331,14 +393,15 @@ func (p *Proxy) finish(ex *exchange, r *http.Request) {
 // capture is the response body seen by ReverseProxy. It hashes and counts
 // every byte, and keeps up to max bytes.
 type capture struct {
-	rc    io.ReadCloser
-	h     hash.Hash
-	buf   bytes.Buffer
-	n     int64
-	max   int64
-	first time.Time
-	eof   bool
-	err   error
+	rc       io.ReadCloser
+	h        hash.Hash
+	buf      bytes.Buffer
+	n        int64
+	max      int64
+	first    time.Time
+	eof      bool
+	err      error
+	progress func() // called after each chunk
 }
 
 func (c *capture) Read(p []byte) (int, error) {
@@ -352,6 +415,7 @@ func (c *capture) Read(p []byte) (int, error) {
 			c.buf.Write(p[:min(int64(n), room)])
 		}
 		c.n += int64(n)
+		c.progress()
 	}
 	switch {
 	case err == io.EOF:

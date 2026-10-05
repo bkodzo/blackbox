@@ -45,9 +45,12 @@ func TestVerifyExitCodes(t *testing.T) {
 	if code := runVerify(args()); code != exitIntact {
 		t.Fatalf("intact log: exit %d", code)
 	}
-	noCPs := []string{"--log", logPath, "--checkpoints", filepath.Join(t.TempDir(), "none"), "--pub", pubPath}
-	if code := runVerify(noCPs); code != exitWarnings {
-		t.Fatalf("no checkpoints: exit %d", code)
+	missing := []string{"--log", logPath, "--checkpoints", filepath.Join(t.TempDir(), "none"), "--pub", pubPath}
+	if code := runVerify(missing); code != exitError {
+		t.Fatalf("missing checkpoint file: exit %d", code)
+	}
+	if code := runVerify(append(missing, "--no-checkpoints")); code != exitWarnings {
+		t.Fatalf("explicitly without checkpoints: exit %d", code)
 	}
 	if code := runVerify([]string{"--log", logPath, "--pub", "/nonexistent/key.pub"}); code != exitError {
 		t.Fatalf("missing key: exit %d", code)

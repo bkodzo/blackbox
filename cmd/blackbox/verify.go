@@ -26,6 +26,7 @@ func runVerify(args []string) int {
 	logPath := fs.String("log", "blackbox.jsonl", "audit log file")
 	cpPath := fs.String("checkpoints", "blackbox.checkpoints.jsonl", "checkpoint file")
 	pubPath := fs.String("pub", filepath.Join(keyDir(), "key.pub"), "gateway public key")
+	noCPs := fs.Bool("no-checkpoints", false, "verify without a checkpoint file (removals from the end cannot be detected)")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), "usage: blackbox verify [flags]\n\nExit codes: 0 intact, 1 tampered, 2 intact with warnings, 3 usage or I/O error.\n\n")
 		fs.PrintDefaults()
@@ -43,6 +44,12 @@ func runVerify(args []string) int {
 	pub, err := ledger.LoadPublicKey(*pubPath)
 	if err != nil {
 		return failCode(exitError, "%v", err)
+	}
+	if _, err := os.Stat(*cpPath); errors.Is(err, os.ErrNotExist) && !*noCPs {
+		return failCode(exitError, "no checkpoint file at %s; pass --checkpoints with its location, or --no-checkpoints to verify without one", *cpPath)
+	}
+	if *noCPs {
+		*cpPath = os.DevNull
 	}
 	cps, cpTorn, err := ledger.ReadCheckpoints(*cpPath)
 	var cpErr *ledger.VerifyError
@@ -84,6 +91,10 @@ func runVerify(args []string) int {
 				warnings = append(warnings, fmt.Sprintf(
 					"seq %d: at startup the gateway moved %d bytes of an incomplete line to %s (sha256 %s)",
 					e.Seq, s.QuarantinedBytes, s.QuarantineFile, s.QuarantineSHA256))
+			}
+			if s.CheckpointTornBytes > 0 {
+				warnings = append(warnings, fmt.Sprintf(
+					"seq %d: at startup the gateway removed %d bytes of an incomplete checkpoint line", e.Seq, s.CheckpointTornBytes))
 			}
 			if s.RepairedSeq > 0 {
 				warnings = append(warnings, fmt.Sprintf(
