@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="390" viewBox="0 0 880 390" role="img" aria-label="Four entries, each storing the previous entry's hash. A checkpoint of entry 4 is copied elsewhere. When entry 3's record is edited, its recomputed hash no longer matches the stored one, and verify reports tampering at entry 3.">
+<style>
+  svg { --bg:#ffffff; --surface:#ffffff; --ink:#17212b; --muted:#5a6573; --line:#c6ced8; --accent:#df5a26; --accent-soft:#fbece5; --flag:#c42a1d; }
+  @media (prefers-color-scheme: dark) {
+    svg { --bg:#0d1117; --surface:#161b22; --ink:#e6edf3; --muted:#9ba7b5; --line:#3a4654; --accent:#ff7d47; --accent-soft:#2a1d17; --flag:#ff6a5c; }
+  }
+  .bg { fill: var(--bg); }
+  text { fill: var(--ink); font: 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  text.t, tspan.t { font-weight: 600; }
+  text.s { fill: var(--muted); font-size: 11.5px; }
+  text.m { font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  text.lane { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; fill: var(--muted); }
+  .acc { fill: var(--accent); }
+  text.bad, tspan.bad { fill: var(--flag); }
+  .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+  .box.key { stroke: var(--accent); stroke-width: 2; }
+  .box.bad { stroke: var(--flag); stroke-width: 2; }
+  .shell { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 6 5; }
+  .pill { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .edge { stroke: var(--muted); stroke-width: 1.6; fill: none; }
+  .edge.acc { stroke: var(--accent); fill: none; }
+  .edge.bad { stroke: var(--flag); }
+  .edge.dash { stroke-dasharray: 5 4; }
+  .tip { fill: var(--muted); }
+  .tip.acc { fill: var(--accent); }
+</style>
+<rect class="bg" x="0" y="0" width="880" height="390" rx="12"/>
+          <defs>
+            <marker id="d3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="tip" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="lane" x="20" y="30">The log as written</text>
+
+          <rect class="box" x="20" y="42" width="180" height="104" rx="8"/>
+          <text class="t" x="34" y="66">Entry 1</text>
+          <text class="m" x="34" y="89">prev 0000...</text>
+          <text class="m" x="34" y="109">hash 9f2c...</text>
+          <text class="s" x="34" y="131">signed by gateway key</text>
+
+          <rect class="box" x="240" y="42" width="180" height="104" rx="8"/>
+          <text class="t" x="254" y="66">Entry 2</text>
+          <text class="m" x="254" y="89">prev 9f2c...</text>
+          <text class="m" x="254" y="109">hash a71b...</text>
+          <text class="s" x="254" y="131">signed by gateway key</text>
+
+          <rect class="box" x="460" y="42" width="180" height="104" rx="8"/>
+          <text class="t" x="474" y="66">Entry 3</text>
+          <text class="m" x="474" y="89">prev a71b...</text>
+          <text class="m" x="474" y="109">hash 5d03...</text>
+          <text class="s" x="474" y="131">signed by gateway key</text>
+
+          <rect class="box" x="680" y="42" width="180" height="104" rx="8"/>
+          <text class="t" x="694" y="66">Entry 4</text>
+          <text class="m" x="694" y="89">prev 5d03...</text>
+          <text class="m" x="694" y="109">hash d81e...</text>
+          <text class="s" x="694" y="131">signed by gateway key</text>
+
+          <line class="edge" x1="240" y1="85" x2="204" y2="85" marker-end="url(#d3a)"/>
+          <line class="edge" x1="460" y1="85" x2="424" y2="85" marker-end="url(#d3a)"/>
+          <line class="edge" x1="680" y1="85" x2="644" y2="85" marker-end="url(#d3a)"/>
+          <text class="s" x="20" y="170">Arrows: "prev" points at the entry before. Changing an entry changes its hash, so the next entry no longer points at it.</text>
+
+          <rect class="pill" x="680" y="184" width="180" height="44" rx="10"/>
+          <text class="t" x="770" y="203" text-anchor="middle">Checkpoint: entry 4</text>
+          <text class="s" x="770" y="220" text-anchor="middle">copied to another machine</text>
+          <line class="edge acc" x1="770" y1="146" x2="770" y2="180"/>
+
+          <text class="lane" x="20" y="262">If someone edits entry 3</text>
+          <text class="t bad" x="860" y="262" text-anchor="end">verify: TAMPERED at entry 3</text>
+
+          <rect class="box" x="20" y="274" width="180" height="104" rx="8"/>
+          <text class="t" x="34" y="298">Entry 1</text>
+          <text class="s" x="34" y="322">unchanged, still valid</text>
+
+          <rect class="box" x="240" y="274" width="180" height="104" rx="8"/>
+          <text class="t" x="254" y="298">Entry 2</text>
+          <text class="s" x="254" y="322">unchanged, still valid</text>
+
+          <rect class="box bad" x="460" y="274" width="180" height="104" rx="8"/>
+          <text class="t bad" x="474" y="298">Entry 3, edited</text>
+          <text class="m" x="474" y="321">stored   5d03...</text>
+          <text class="m bad" x="474" y="341">computed 7be1...</text>
+          <text class="s" x="474" y="363">hash no longer matches</text>
+
+          <rect class="box" x="680" y="274" width="180" height="104" rx="8"/>
+          <text class="t" x="694" y="298">Entry 4</text>
+          <text class="s" x="694" y="322">checks stop at entry 3</text>
+
+          <line class="edge" x1="240" y1="317" x2="204" y2="317" marker-end="url(#d3a)"/>
+          <line class="edge" x1="460" y1="317" x2="424" y2="317" marker-end="url(#d3a)"/>
+        </svg>

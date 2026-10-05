@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="320" viewBox="0 0 880 320" role="img" aria-label="The agent sends calls to blackbox, which forwards them to the model server and streams replies back. Inside blackbox the proxy hands a copy of each exchange to the recorder, which appends signed entries to the audit log. Checkpoints go to another machine; auditors read and verify the log.">
+<style>
+  svg { --bg:#ffffff; --surface:#ffffff; --ink:#17212b; --muted:#5a6573; --line:#c6ced8; --accent:#df5a26; --accent-soft:#fbece5; --flag:#c42a1d; }
+  @media (prefers-color-scheme: dark) {
+    svg { --bg:#0d1117; --surface:#161b22; --ink:#e6edf3; --muted:#9ba7b5; --line:#3a4654; --accent:#ff7d47; --accent-soft:#2a1d17; --flag:#ff6a5c; }
+  }
+  .bg { fill: var(--bg); }
+  text { fill: var(--ink); font: 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  text.t, tspan.t { font-weight: 600; }
+  text.s { fill: var(--muted); font-size: 11.5px; }
+  text.m { font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  text.lane { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; fill: var(--muted); }
+  .acc { fill: var(--accent); }
+  text.bad, tspan.bad { fill: var(--flag); }
+  .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+  .box.key { stroke: var(--accent); stroke-width: 2; }
+  .box.bad { stroke: var(--flag); stroke-width: 2; }
+  .shell { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 6 5; }
+  .pill { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .edge { stroke: var(--muted); stroke-width: 1.6; fill: none; }
+  .edge.acc { stroke: var(--accent); fill: none; }
+  .edge.bad { stroke: var(--flag); }
+  .edge.dash { stroke-dasharray: 5 4; }
+  .tip { fill: var(--muted); }
+  .tip.acc { fill: var(--accent); }
+</style>
+<rect class="bg" x="0" y="0" width="880" height="320" rx="12"/>
+          <defs>
+            <marker id="d1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="tip" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="d1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="tip acc" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <rect class="shell" x="230" y="20" width="420" height="250" rx="14"/>
+          <text class="t acc" x="250" y="44">blackbox</text>
+          <text class="s" x="322" y="44">one Go binary</text>
+
+          <rect class="box" x="20" y="50" width="150" height="60" rx="8"/>
+          <text class="t" x="95" y="76" text-anchor="middle">AI agent</text>
+          <text class="s" x="95" y="95" text-anchor="middle">any agent code</text>
+
+          <rect class="box key" x="260" y="60" width="160" height="56" rx="8"/>
+          <text class="t" x="340" y="84" text-anchor="middle">Proxy</text>
+          <text class="s" x="340" y="102" text-anchor="middle">forwards, copies bytes</text>
+
+          <rect class="box key" x="260" y="170" width="160" height="56" rx="8"/>
+          <text class="t" x="340" y="194" text-anchor="middle">Recorder</text>
+          <text class="s" x="340" y="212" text-anchor="middle">parses, checks, signs</text>
+
+          <rect class="box key" x="460" y="170" width="160" height="56" rx="8"/>
+          <text class="t" x="540" y="194" text-anchor="middle">Audit log</text>
+          <text class="s" x="540" y="212" text-anchor="middle">signed, chained entries</text>
+
+          <rect class="box" x="710" y="50" width="150" height="60" rx="8"/>
+          <text class="t" x="785" y="76" text-anchor="middle">Model server</text>
+          <text class="s" x="785" y="95" text-anchor="middle">any model or provider</text>
+
+          <rect class="box" x="710" y="180" width="150" height="56" rx="8"/>
+          <text class="t" x="785" y="204" text-anchor="middle">Another machine</text>
+          <text class="s" x="785" y="222" text-anchor="middle">keeps checkpoint copies</text>
+
+          <rect class="box" x="20" y="180" width="150" height="56" rx="8"/>
+          <text class="t" x="95" y="204" text-anchor="middle">Auditor</text>
+          <text class="s" x="95" y="222" text-anchor="middle">verify, sessions, show</text>
+
+          <line class="edge" x1="170" y1="72" x2="256" y2="72" marker-end="url(#d1a)"/>
+          <text class="s" x="213" y="65" text-anchor="middle">request</text>
+          <line class="edge" x1="258" y1="98" x2="174" y2="98" marker-end="url(#d1a)"/>
+          <text class="s" x="213" y="115" text-anchor="middle">reply</text>
+
+          <line class="edge" x1="420" y1="72" x2="706" y2="72" marker-end="url(#d1a)"/>
+          <text class="s" x="565" y="65" text-anchor="middle">forwarded unchanged</text>
+          <line class="edge" x1="708" y1="98" x2="424" y2="98" marker-end="url(#d1a)"/>
+          <text class="s" x="565" y="115" text-anchor="middle">streamed reply</text>
+
+          <line class="edge acc" x1="340" y1="116" x2="340" y2="166" marker-end="url(#d1b)"/>
+          <text class="s" x="350" y="146">copy + hashes</text>
+
+          <line class="edge acc" x1="420" y1="198" x2="456" y2="198" marker-end="url(#d1b)"/>
+
+          <line class="edge" x1="620" y1="208" x2="706" y2="208" marker-end="url(#d1a)"/>
+          <text class="s" x="663" y="200" text-anchor="middle">checkpoints</text>
+
+          <path class="edge" d="M540,226 V296 H95 V240" marker-end="url(#d1a)"/>
+          <text class="s" x="318" y="290" text-anchor="middle">reads and verifies</text>
+        </svg>

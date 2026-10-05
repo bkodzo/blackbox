@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="260" viewBox="0 0 900 260" role="img" aria-label="Request path: receive, forward to the model, stream the reply back while copying and hashing it. Then a hand-off through a bounded queue to the background: parse, check, sign, write in batches, and checkpoint.">
+<style>
+  svg { --bg:#ffffff; --surface:#ffffff; --ink:#17212b; --muted:#5a6573; --line:#c6ced8; --accent:#df5a26; --accent-soft:#fbece5; --flag:#c42a1d; }
+  @media (prefers-color-scheme: dark) {
+    svg { --bg:#0d1117; --surface:#161b22; --ink:#e6edf3; --muted:#9ba7b5; --line:#3a4654; --accent:#ff7d47; --accent-soft:#2a1d17; --flag:#ff6a5c; }
+  }
+  .bg { fill: var(--bg); }
+  text { fill: var(--ink); font: 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  text.t, tspan.t { font-weight: 600; }
+  text.s { fill: var(--muted); font-size: 11.5px; }
+  text.m { font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  text.lane { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; fill: var(--muted); }
+  .acc { fill: var(--accent); }
+  text.bad, tspan.bad { fill: var(--flag); }
+  .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+  .box.key { stroke: var(--accent); stroke-width: 2; }
+  .box.bad { stroke: var(--flag); stroke-width: 2; }
+  .shell { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 6 5; }
+  .pill { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .edge { stroke: var(--muted); stroke-width: 1.6; fill: none; }
+  .edge.acc { stroke: var(--accent); fill: none; }
+  .edge.bad { stroke: var(--flag); }
+  .edge.dash { stroke-dasharray: 5 4; }
+  .tip { fill: var(--muted); }
+  .tip.acc { fill: var(--accent); }
+</style>
+<rect class="bg" x="0" y="0" width="900" height="260" rx="12"/>
+          <defs>
+            <marker id="d2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="tip" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="d2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="tip acc" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="lane" x="16" y="78">Agent</text>
+          <text class="lane" x="16" y="93">waits</text>
+          <text class="lane" x="16" y="198">In the</text>
+          <text class="lane" x="16" y="213">background</text>
+
+          <rect class="box" x="130" y="55" width="140" height="54" rx="8"/>
+          <text class="t" x="200" y="78" text-anchor="middle">Receive</text>
+          <text class="s" x="200" y="96" text-anchor="middle">size limit, timeout</text>
+          <rect class="box" x="300" y="55" width="140" height="54" rx="8"/>
+          <text class="t" x="370" y="78" text-anchor="middle">Forward</text>
+          <text class="s" x="370" y="96" text-anchor="middle">to the model server</text>
+          <rect class="box key" x="470" y="55" width="140" height="54" rx="8"/>
+          <text class="t" x="540" y="78" text-anchor="middle">Stream back</text>
+          <text class="s" x="540" y="96" text-anchor="middle">copy + hash bytes</text>
+          <rect class="pill" x="640" y="62" width="160" height="40" rx="20"/>
+          <text class="t" x="720" y="87" text-anchor="middle">Agent has its reply</text>
+
+          <line class="edge" x1="270" y1="82" x2="296" y2="82" marker-end="url(#d2a)"/>
+          <line class="edge" x1="440" y1="82" x2="466" y2="82" marker-end="url(#d2a)"/>
+          <line class="edge" x1="610" y1="82" x2="636" y2="82" marker-end="url(#d2a)"/>
+
+          <path class="edge acc" d="M540,109 V140 H195 V171" marker-end="url(#d2b)"/>
+          <text class="s" x="368" y="133" text-anchor="middle">hand-off through a bounded queue</text>
+
+          <rect class="box key" x="130" y="175" width="130" height="54" rx="8"/>
+          <text class="t" x="195" y="198" text-anchor="middle">Parse</text>
+          <text class="s" x="195" y="216" text-anchor="middle">calls, reasoning</text>
+          <rect class="box key" x="282" y="175" width="130" height="54" rx="8"/>
+          <text class="t" x="347" y="198" text-anchor="middle">Check</text>
+          <text class="s" x="347" y="216" text-anchor="middle">conversation rules</text>
+          <rect class="box key" x="434" y="175" width="130" height="54" rx="8"/>
+          <text class="t" x="499" y="198" text-anchor="middle">Sign</text>
+          <text class="s" x="499" y="216" text-anchor="middle">hash + signature</text>
+          <rect class="box key" x="586" y="175" width="130" height="54" rx="8"/>
+          <text class="t" x="651" y="198" text-anchor="middle">Write</text>
+          <text class="s" x="651" y="216" text-anchor="middle">batched every 50 ms</text>
+          <rect class="box key" x="738" y="175" width="130" height="54" rx="8"/>
+          <text class="t" x="803" y="198" text-anchor="middle">Checkpoint</text>
+          <text class="s" x="803" y="216" text-anchor="middle">signed, copied out</text>
+
+          <line class="edge acc" x1="260" y1="202" x2="278" y2="202" marker-end="url(#d2b)"/>
+          <line class="edge acc" x1="412" y1="202" x2="430" y2="202" marker-end="url(#d2b)"/>
+          <line class="edge acc" x1="564" y1="202" x2="582" y2="202" marker-end="url(#d2b)"/>
+          <line class="edge acc" x1="716" y1="202" x2="734" y2="202" marker-end="url(#d2b)"/>
+        </svg>
