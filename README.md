@@ -106,12 +106,15 @@ Anomalies are flags for review; blackbox never blocks a call.
 
 ## How it works
 
+![The agent sends calls to blackbox, which forwards them to the model server. Inside blackbox the proxy hands a copy of each exchange to the recorder, which appends signed entries to the audit log; checkpoints go to another machine and auditors verify the log.](docs/images/overview.svg)
+
 blackbox forwards any HTTP path and records the exact bytes of every exchange.
 It reads model names, token usage, tool calls, and the model's reasoning (when
 the server returns it) from the two common response shapes, streamed or not,
 and records anything else in full. Parsing, signing, and disk writes happen off
 the request path, so agents are not kept waiting on them.
 
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) walks through the design in diagrams,
 [DESIGN.md](docs/DESIGN.md) explains the log format and the checks,
 [THREAT_MODEL.md](docs/THREAT_MODEL.md) what blackbox does and does not
 protect against, and [SCHEMA.md](docs/SCHEMA.md) every recorded field.
