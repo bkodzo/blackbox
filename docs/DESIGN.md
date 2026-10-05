@@ -169,14 +169,27 @@ calls that could not be recorded, and calls cancelled.
 
 | Limit | Default | Why |
 |---|---|---|
-| Requests in flight | 64 | More get 503 and are recorded as refused; bounds memory to about 64 x (64 + 32) MiB |
-| Request size | 64 MiB | Larger requests get 413 and are recorded as refused |
+| Requests in flight | 32 | More get 503 |
+| Requests per client address | 8 | More get 503, so one client cannot take every slot |
+| Request size | 32 MiB | Larger requests get 413 and are recorded as refused |
 | Stored body size | 32 MiB | Bodies beyond this are truncated in the log; hashes cover every byte |
 | Request body read | 1 minute | A slow client cannot hold a request open indefinitely |
 | Upstream response headers | 10 minutes | A model server that never answers frees its slot |
 | Response progress | 5 minutes | A response that stalls, or a client that stops reading, is cancelled and recorded, freeing its slot |
 | Idle connections | 2 minutes | |
 | Protocol upgrades | refused | Traffic after a switch to another protocol could not be recorded; `--allow-upgrades` permits it |
+
+Requests refused for capacity were never forwarded, so they are counted in
+`gateway_stop` rather than recorded one by one; otherwise a flood of requests
+could grow the log without limit. Memory for bodies is bounded by roughly
+`max_in_flight x (max_request_bytes + max_body_bytes)` for calls in flight
+(2 GiB with the defaults, reached only if every slot carries a maximum-size
+request and response), plus 256 MiB of exchanges waiting to be recorded and
+64 MiB of entries waiting to be written. Lower the limits on small hosts.
+
+Shutdown waits a bounded time for calls in flight and for the recorder, so a
+disk that stops responding cannot keep the process from exiting; the gateway
+then exits with an error and without writing `gateway_stop`.
 
 ## Format parsing
 
@@ -250,9 +263,19 @@ For each call the tracker checks that:
   `unverifiable_tool_result` rather than trusted;
 - the tools and leading system prompt have not changed, and no system or
   developer message was added mid-conversation;
-- no key in the request differs from a known field only in letter case
-  (`ambiguous_request`). The parser would match such a key, but a model server
-  might not, so the two could read different content.
+- no key in the parts of the request the parser reads (the request itself,
+  messages, content blocks, tool calls, tool definitions) would be read by Go's
+  decoder as a field it is not exactly named after (`ambiguous_request`). Go
+  matches names with Unicode case folding, so `Tool_Calls` or `tool_call` with
+  a long s would be read as `tool_calls`, while a model server reading exact
+  keys would not. The check asks the decoder itself, so it cannot drift from
+  what the parser actually does. Tool arguments and schemas are not checked;
+  the parser never reads their keys as fields.
+
+Reasoning the agent echoes back (in reasoning fields or thinking blocks) must
+match reasoning the model returned. Text before a closing think tag with no
+opening tag is treated as reasoning for comparisons but is still searched for
+tool calls written as text, so a stray tag cannot hide one.
 
 Text the agent sends is always compared as sent. A model reply written with
 inline reasoning may be echoed with or without that reasoning, and both forms

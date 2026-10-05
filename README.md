@@ -103,7 +103,10 @@ unrecorded.
 | `text_scan_partial` | The reply was too long or complex to search completely for tool calls written as text |
 | `ambiguous_request` | The request has keys that differ from expected fields only in letter case, so the model server may read it differently |
 
-Anomalies are flags for review; blackbox never blocks a call.
+Anomalies are flags for review, and blackbox never blocks a call. They come
+from heuristics about how agents and servers lay out messages, so they can miss
+unusual layouts or flag unusual but honest ones. The signed log is the
+guarantee; the anomaly checks help a reviewer decide where to look.
 
 ## How it works
 

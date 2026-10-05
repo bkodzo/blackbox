@@ -35,6 +35,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `quarantine_file` | Where those bytes were saved |
 | `quarantine_sha256` | Hash of those bytes |
 | `checkpoint_torn_bytes` | Bytes of an incomplete final checkpoint line removed at startup |
+| `checkpoints_missing` | The log had entries but its checkpoint file was missing and was created empty |
 
 ## gateway_stop
 
@@ -45,6 +46,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `calls` | Calls recorded by this run |
 | `unrecorded` | Calls forwarded but not recorded (only possible in fail-open mode or at a write failure) |
 | `aborted_at_shutdown` | Calls cancelled when the shutdown grace period ended; each is recorded |
+| `refused` | Requests refused because a capacity limit was reached; they were never forwarded |
 
 ## llm_call
 
@@ -113,7 +115,7 @@ making it. The agent may not have run it.
 
 | Field | Meaning |
 |---|---|
-| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, `client_aborted`, `gateway_shutdown`, `request_too_large`, `gateway_busy`, `upgrade_refused`, or `stream_idle` |
+| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, `client_aborted`, `gateway_shutdown`, `request_too_large`, `upgrade_refused`, or `stream_idle` |
 | `error.message` | Detail |
 | `timing.received_at` | Request received by the gateway |
 | `timing.upstream_sent_at` | Request sent to the model server |

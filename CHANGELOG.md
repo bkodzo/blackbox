@@ -16,8 +16,9 @@ First release.
 - Fails closed: if the log cannot be written, new requests are refused, calls
   in flight are cancelled, and the gateway exits. `--fail-open` is available.
 - Group commit with bounded buffers, a byte-bounded recording queue, request
-  size and in-flight limits, read, upstream, and response progress timeouts,
-  and a shutdown that records calls cancelled at the end of the grace period.
+  size, in-flight, and per-client limits, read, upstream, and response progress
+  timeouts, and a bounded shutdown that records calls cancelled at the end of
+  the grace period and counts requests refused for capacity.
 - Protocol upgrades are refused by default, since their traffic cannot be
   recorded.
 - `blackbox verify`: single streaming pass, parallel signature checks, plain
@@ -29,7 +30,10 @@ First release.
   results, rewritten or truncated history (including changed tool call
   arguments, reply text, and replies attributed to the model that it never
   sent), changed tools or system prompt, model substitution, aborted streams,
-  high-risk tools, and tool calls written as text or run from text.
+  high-risk tools, tool calls written as text or run from text, reasoning
+  echoed back that the model never returned, and requests with keys that the
+  parser and a model server could read differently. These checks are
+  best-effort review flags; the signed log is the guarantee.
 - Extraction of the model's reasoning (reasoning fields, thinking blocks, or
   inline think tags), shown by `blackbox show`.
 - Risk map for classifying tools by level and category.

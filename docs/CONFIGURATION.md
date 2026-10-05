@@ -16,8 +16,9 @@ in the file are rejected.
 | `--risk` | `risk_map` | none | Risk map (see [examples/risk.json](../examples/risk.json)) |
 | `--sync` | `sync` | `group` | `group` (batched fsync) or `always` (fsync every entry) |
 | `--max-body` | `max_body_bytes` | 32 MiB | Bytes of each body stored; hashes always cover every byte |
-| `--max-request` | `max_request_bytes` | 64 MiB | Larger requests are refused with 413 and recorded |
-| `--max-in-flight` | `max_in_flight` | `64` | Requests handled at once; more are refused with 503 and recorded |
+| `--max-request` | `max_request_bytes` | 32 MiB | Larger requests are refused with 413 and recorded. Keep it at or below `max_body_bytes` so requests are never stored truncated |
+| `--max-in-flight` | `max_in_flight` | `32` | Requests handled at once; more are refused with 503 and counted in `gateway_stop` |
+| `--max-per-client` | `max_per_client` | `8` | Requests handled at once for one client address; more are refused with 503 and counted |
 | `--checkpoint-stdout` | `checkpoint_stdout` | `true` | Also print checkpoints to stdout |
 | `--checkpoint-records` | `checkpoint_records` | `100` | Write a checkpoint at least every this many entries |
 | `--checkpoint-interval` | `checkpoint_interval` | `30s` | Write a checkpoint at least this often while entries are written |

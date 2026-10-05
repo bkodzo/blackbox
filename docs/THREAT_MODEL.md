@@ -65,6 +65,9 @@ agent, or something that has taken control of it, misrepresents what happened:
 
 Conversations are tracked with or without a session header, and the state is
 rebuilt from the log after a restart. These are flags for review, not blocks.
+They are heuristics about how agents and servers lay out messages: an unusual
+layout can be missed or flagged. The tamper-evident log is the guarantee; the
+anomaly checks guide review.
 
 ## Assumptions
 
@@ -117,9 +120,20 @@ rebuilt from the log after a restart. These are flags for review, not blocks.
 - **Fail-open mode.** With `--fail-open`, traffic continues after the log fails
   and is not recorded. In the default mode, a call already being answered when
   the log fails can finish its response unrecorded; no new call is forwarded.
-- **Few-shot examples.** A conversation the gateway has never seen may open with
-  example model replies written by the agent. These are not flagged, since they
-  cannot be told apart from a conversation that began before the gateway.
+- **Few-shot examples, and conversations without a session ID.** A
+  conversation the gateway has never seen may open with model replies written
+  by the agent (examples, or fabricated history). These are not flagged, since
+  they cannot be told apart from a conversation that began before the gateway.
+  Without a session ID, a conversation is recognised only by its opening
+  messages, so fabricated history under an opening the gateway has not seen is
+  not detected. Send `X-Blackbox-Session` for the strongest checks.
+- **Denial of service.** Anyone who can reach the gateway can use its capacity.
+  Per-client limits stop one address from taking every slot, but many
+  addresses can still exhaust it. Requests refused for capacity are counted,
+  not recorded.
+- **Upgraded connections.** With `--allow-upgrades`, a connection that switched
+  protocols is not subject to the response idle limit or the shutdown grace
+  period.
 - **Confidentiality.** The log contains full prompts, responses, and any model
   reasoning in plain text. It is created with owner-only permissions but is not
   encrypted, and there is no redaction yet.
