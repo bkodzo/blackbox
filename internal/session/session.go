@@ -44,15 +44,21 @@ type state struct {
 	turn      int
 	lastSeen  time.Time
 	lastSeq   uint64
-	messages  []string          // message hashes of the previous request
-	calls     []toolCall        // structured tool calls the model returned last turn
-	textCalls []toolCall        // tool calls the model wrote as text last turn
-	text      string            // hash of the model's reply text last turn
-	replied   bool              // the model returned text or calls last turn
-	issued    map[string]uint64 // tool call ID -> seq of the call that issued it
-	answered  map[string]bool   // tool call IDs that already have a result
-	tools     string
-	system    string
+	messages  []string   // message hashes of the previous request
+	calls     []toolCall // structured tool calls the model returned last turn
+	textCalls []toolCall // tool calls the model wrote as text last turn
+	text      string     // hash of the model's reply text last turn, as returned
+	textAlt   string     // the same without inline reasoning, which agents may strip
+	// verifiedReply is the index of the first message in the history that
+	// blackbox checked as an echo of a real model reply, or -1. Conversations
+	// without a session ID are related only through such a reply; example
+	// replies an agent writes into its prompt do not count.
+	verifiedReply int
+	replied       bool              // the model returned text or calls last turn
+	issued        map[string]uint64 // tool call ID -> seq of the call that issued it
+	answered      map[string]bool   // tool call IDs that already have a result
+	tools         string
+	system        string
 }
 
 // Tracker holds per-conversation state.
@@ -84,6 +90,8 @@ type Observation struct {
 	calls     []toolCall
 	textCalls []toolCall
 	text      string
+	textAlt   string
+	echoIdx   int // index of the echo checked in this request, or -1
 	tools     string
 	system    string
 	adopted   map[string]uint64 // IDs the agent assigned to calls the model returned without IDs
@@ -105,10 +113,16 @@ func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 
 	msgs := p.Request.Messages
 	obs := &Observation{
-		tools:  p.Request.ToolsSHA256,
-		system: p.Request.SystemSHA256,
-		text:   format.TextHash(p.Response.Text),
-		failed: c.Error != nil,
+		tools:   p.Request.ToolsSHA256,
+		system:  p.Request.SystemSHA256,
+		echoIdx: -1,
+		failed:  c.Error != nil,
+	}
+	obs.text, obs.textAlt = format.ReplyHashes(p.Response.FullText, p.Response.Text)
+	if keys := p.Request.CaseVariantKeys; len(keys) > 0 {
+		flag(c, record.AnomalyAmbiguousRequest,
+			"the request has keys that differ from expected fields only in letter case (%s); the model server may read different content than was checked",
+			strings.Join(keys, ", "))
 	}
 	for _, m := range msgs {
 		obs.messages = append(obs.messages, m.SHA256)
@@ -135,16 +149,24 @@ func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 		c.Session.Conversation = obs.root[:16]
 		if s = t.match(obs.root, obs.messages, msgs); s != nil {
 			start = len(s.messages)
-		} else if closest, n := t.closest(obs.root, obs.messages); closest != nil && sharesModelTurn(msgs, n) {
-			// The history diverges from every branch seen so far, after at
-			// least one model reply they have in common: check it against the
-			// closest branch and record it as a new branch, which inherits only
-			// the tool calls in the shared part. Conversations that share no
-			// more than their opening are unrelated and start fresh.
-			s = closest
-			start = historyCheck(c, s, obs.messages, msgs)
-			obs.branch = true
-			obs.inheritIssued, obs.inheritAnswered = shared(s, msgs[:n])
+		} else if closest, n := t.closest(obs.root, obs.messages); closest != nil && closest.verifiedReply >= 0 {
+			switch {
+			case closest.verifiedReply < n:
+				// The history diverges from every branch seen so far, after a
+				// model reply they share: check it against the closest branch
+				// and record it as a new branch, which inherits only the tool
+				// calls in the shared part.
+				s = closest
+				start = historyCheck(c, s, obs.messages, msgs)
+				obs.branch = true
+				obs.inheritIssued, obs.inheritAnswered = shared(s, msgs[:n])
+			case closest.verifiedReply == n && n < len(msgs) && msgs[n].Role == "assistant":
+				// Same opening, but the first reply attributed to the model is
+				// not one it gave in any branch of this conversation.
+				flag(c, record.AnomalyHistoryRewritten,
+					"message %d is attributed to the model, but the model gave a different reply to this conversation's opening", n+1)
+			}
+			// Otherwise the two share only their opening and are unrelated.
 		}
 	}
 	obs.state = s
@@ -161,7 +183,7 @@ func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 	c.Turn = s.turn + 1
 
 	if start >= 0 && start < len(msgs) {
-		checkAdded(c, s, msgs[start:], obs)
+		checkAdded(c, s, msgs, start, obs)
 	}
 	if obs.tools != s.tools {
 		flag(c, record.AnomalyToolsetChanged, "tools offered differ from turn %d", s.turn)
@@ -219,7 +241,8 @@ func historyCheck(c *record.LLMCall, s *state, cur []string, msgs []format.Messa
 // most one model message, the echo of the model's last reply, which must come
 // first and match what the model returned. Tool results must answer calls the
 // model issued, each only once.
-func checkAdded(c *record.LLMCall, s *state, added []format.Message, obs *Observation) {
+func checkAdded(c *record.LLMCall, s *state, msgs []format.Message, start int, obs *Observation) {
+	added := msgs[start:]
 	echoAt := slices.IndexFunc(added, func(m format.Message) bool { return m.Role == "assistant" })
 	switch {
 	case echoAt < 0 && s.replied && toolResults(added) > 0:
@@ -237,6 +260,7 @@ func checkAdded(c *record.LLMCall, s *state, added []format.Message, obs *Observ
 				"a reply is attributed to the model, but the model returned nothing in turn %d", s.turn)
 		} else {
 			obs.adopted = checkEcho(c, s, added[echoAt])
+			obs.echoIdx = start + echoAt
 		}
 		extra := 0
 		for _, m := range added[echoAt+1:] {
@@ -339,7 +363,7 @@ func checkEcho(c *record.LLMCall, s *state, echo format.Message) map[string]uint
 		}
 	}
 	switch {
-	case echo.TextSHA256 == s.text:
+	case echo.TextSHA256 == s.text || echo.TextSHA256 == s.textAlt:
 	case s.text == "":
 		flag(c, record.AnomalyHistoryRewritten, "the echoed reply contains text the model never returned")
 	case echo.TextSHA256 == "":
@@ -395,12 +419,6 @@ func (t *Tracker) closest(root string, cur []string) (*state, int) {
 	return best, bestN
 }
 
-// sharesModelTurn reports whether the first n messages include a model reply,
-// which makes two conversations with the same opening related.
-func sharesModelTurn(msgs []format.Message, n int) bool {
-	return slices.ContainsFunc(msgs[:max(n, 0)], func(m format.Message) bool { return m.Role == "assistant" })
-}
-
 // shared returns the tool calls issued and answered within the common part
 // of a conversation, so a new branch inherits nothing from after the point
 // where it diverged.
@@ -433,7 +451,7 @@ func echoes(s *state, m format.Message) bool {
 			return false
 		}
 	}
-	return len(m.ToolCalls) > 0 || (s.text != "" && s.text == m.TextSHA256)
+	return len(m.ToolCalls) > 0 || (s.text != "" && (s.text == m.TextSHA256 || s.textAlt == m.TextSHA256))
 }
 
 // Commit records an observed call, written at seq, into its conversation.
@@ -456,10 +474,10 @@ func (t *Tracker) CommitAt(obs *Observation, seq uint64, at time.Time) {
 		return
 	}
 	if s == nil || obs.branch {
-		n := &state{key: obs.sessionID, root: obs.root, issued: map[string]uint64{}, answered: map[string]bool{}}
+		n := &state{key: obs.sessionID, root: obs.root, issued: map[string]uint64{}, answered: map[string]bool{}, verifiedReply: -1}
 		if s != nil {
-			n.turn = s.turn
-			n.calls, n.textCalls, n.text, n.replied = s.calls, s.textCalls, s.text, s.replied
+			n.turn, n.verifiedReply = s.turn, s.verifiedReply
+			n.calls, n.textCalls, n.text, n.textAlt, n.replied = s.calls, s.textCalls, s.text, s.textAlt, s.replied
 			maps.Copy(n.issued, obs.inheritIssued)
 			maps.Copy(n.answered, obs.inheritAnswered)
 		}
@@ -470,8 +488,11 @@ func (t *Tracker) CommitAt(obs *Observation, seq uint64, at time.Time) {
 	s.turn++
 	s.lastSeen, s.lastSeq = at, seq
 	s.messages, s.tools, s.system = obs.messages, obs.tools, obs.system
-	s.calls, s.textCalls, s.text = obs.calls, obs.textCalls, obs.text
+	s.calls, s.textCalls, s.text, s.textAlt = obs.calls, obs.textCalls, obs.text, obs.textAlt
 	s.replied = len(obs.calls) > 0 || obs.text != ""
+	if s.verifiedReply < 0 && obs.echoIdx >= 0 {
+		s.verifiedReply = obs.echoIdx
+	}
 	for _, tc := range obs.calls {
 		if tc.id != "" {
 			s.issued[tc.id] = seq
@@ -554,6 +575,23 @@ func (t *Tracker) remove(s *state) {
 // as the start of a conversation.
 func (t *Tracker) Forget(sessionID string) {
 	if s, ok := t.sessions[sessionID]; ok && sessionID != "" {
+		t.remove(s)
+	}
+}
+
+// ForgetConversation drops every branch of the conversation a request
+// without a session ID belongs to. With no messages to identify it, it drops
+// every conversation tracked without a session ID.
+func (t *Tracker) ForgetConversation(msgs []format.Message) {
+	if len(msgs) == 0 {
+		for _, ss := range t.convs {
+			for _, s := range slices.Clone(ss) {
+				t.remove(s)
+			}
+		}
+		return
+	}
+	for _, s := range slices.Clone(t.convs[conversationRoot(msgs)]) {
 		t.remove(s)
 	}
 }
