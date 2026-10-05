@@ -52,9 +52,16 @@ func Rebuild(path string, idle time.Duration) (*session.Tracker, int, error) {
 			return nil
 		}
 		if c.Request.Body.Truncated || c.Response.Body.Truncated {
-			// The stored history is incomplete; checking later turns against it
-			// would raise false alarms. Treat the conversation as unseen.
-			t.Forget(c.Session.ID)
+			// The stored turn is incomplete; checking later turns against the
+			// state before it would raise false alarms. Treat the conversation
+			// as unseen.
+			if c.Session.ID != "" {
+				t.Forget(c.Session.ID)
+			} else if c.Request.Body.Truncated {
+				t.ForgetConversation(nil) // cannot tell which conversation it was
+			} else {
+				t.ForgetConversation(format.Parse(bodyBytes(c.Request.Body), nil, false).Request.Messages)
+			}
 			return nil
 		}
 		p := format.Parse(bodyBytes(c.Request.Body), bodyBytes(c.Response.Body), c.Response.Stream != nil)
