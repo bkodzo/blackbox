@@ -441,7 +441,12 @@ func TestCheckpointFileTornLineIsTolerated(t *testing.T) {
 	if _, torn, err := ReadCheckpoints(f.cps); err != nil || torn == 0 {
 		t.Fatalf("torn %d err %v", torn, err)
 	}
-	f.write(t, 1) // Open drops the partial checkpoint line
+	l := f.open(t, Options{}) // Open drops the partial checkpoint line and reports it
+	if l.Recovery().CheckpointTornBytes == 0 {
+		t.Fatal("the removed checkpoint bytes were not reported")
+	}
+	l.Append([]byte(`{"i":1}`))
+	l.Close()
 	if _, err := f.verify(t); err != nil {
 		t.Fatal(err)
 	}
@@ -554,6 +559,10 @@ func TestRefusedOpenLeavesTheLogUntouched(t *testing.T) {
 	lines := f.lines(t)
 	torn := strings.Join(lines[:2], "") + lines[2][:20] // cut mid-line, below the checkpoint
 	os.WriteFile(f.log, []byte(torn), 0o600)
+	fh, _ := os.OpenFile(f.cps, os.O_APPEND|os.O_WRONLY, 0)
+	fh.WriteString(`{"v":2,"log":"ab`) // and a torn checkpoint line
+	fh.Close()
+	cpsBefore, _ := os.ReadFile(f.cps)
 	if _, err := Open(f.log, f.priv, Options{CheckpointPath: f.cps}); err == nil {
 		t.Fatal("opened a log below its checkpoint")
 	}
@@ -563,6 +572,9 @@ func TestRefusedOpenLeavesTheLogUntouched(t *testing.T) {
 	}
 	if m, _ := filepath.Glob(f.log + ".torn-*"); len(m) != 0 {
 		t.Fatalf("a refused Open created %v", m)
+	}
+	if cpsAfter, _ := os.ReadFile(f.cps); string(cpsAfter) != string(cpsBefore) {
+		t.Fatal("a refused Open changed the checkpoint file")
 	}
 }
 

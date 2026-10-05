@@ -43,8 +43,8 @@ type Options struct {
 	// CheckpointPath receives a signed checkpoint after durable flushes, at
 	// most every CheckpointRecords records or CheckpointInterval.
 	CheckpointPath     string
-	CheckpointRecords  uint64        // default 1000
-	CheckpointInterval time.Duration // default 5m
+	CheckpointRecords  uint64        // default 100
+	CheckpointInterval time.Duration // default 30s
 	// OnFailure, if set, is called once, from its own goroutine, when a write
 	// or fsync fails and the ledger stops accepting appends.
 	OnFailure func(error)
@@ -66,10 +66,10 @@ func (o *Options) setDefaults() {
 		o.MaxPending = 64 << 20
 	}
 	if o.CheckpointRecords == 0 {
-		o.CheckpointRecords = 1000
+		o.CheckpointRecords = 100
 	}
 	if o.CheckpointInterval <= 0 {
-		o.CheckpointInterval = 5 * time.Minute
+		o.CheckpointInterval = 30 * time.Second
 	}
 }
 
@@ -83,6 +83,10 @@ type Recovery struct {
 	QuarantinedBytes int64
 	QuarantineFile   string
 	QuarantineSHA256 string
+	// CheckpointTornBytes are bytes of an incomplete final checkpoint line,
+	// removed after the checks passed. A checkpoint only restates a signed
+	// entry, so nothing is lost.
+	CheckpointTornBytes int64
 }
 
 // Ledger appends entries to a log file. It is safe for concurrent use.
@@ -324,17 +328,6 @@ func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
 	if err != nil {
 		return fmt.Errorf("ledger: %s: %w", l.opt.CheckpointPath, err)
 	}
-	if torn > 0 {
-		// A checkpoint only restates a signed entry, so an interrupted
-		// checkpoint write loses nothing; drop it so the file stays parseable.
-		st, err := l.cp.Stat()
-		if err != nil {
-			return err
-		}
-		if err := os.Truncate(l.opt.CheckpointPath, st.Size()-torn); err != nil {
-			return err
-		}
-	}
 	for _, c := range cps {
 		if err := c.verify(pub, l.kid); err != nil {
 			return fmt.Errorf("ledger: %v; run `blackbox verify`", err)
@@ -350,6 +343,19 @@ func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
 			return fmt.Errorf("ledger: entry %d differs from its signed checkpoint; run `blackbox verify`", c.Seq)
 		}
 		l.cpSeq = max(l.cpSeq, c.Seq)
+	}
+	if torn > 0 {
+		// Only now that the log is accepted: drop an interrupted checkpoint
+		// write so the file stays parseable. Truncate by path, since an
+		// append-only handle cannot truncate on Windows.
+		st, err := l.cp.Stat()
+		if err != nil {
+			return err
+		}
+		if err := os.Truncate(l.opt.CheckpointPath, st.Size()-torn); err != nil {
+			return err
+		}
+		l.rec.CheckpointTornBytes = torn
 	}
 	return nil
 }
