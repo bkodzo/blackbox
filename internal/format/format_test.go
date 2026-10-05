@@ -478,8 +478,10 @@ func TestUnopenedThinkSection(t *testing.T) {
 	if strings.TrimSpace(p.Response.Text) != "No changes needed." || !strings.Contains(p.Response.Reasoning, "Let me consider") {
 		t.Fatalf("text %q reasoning %q", p.Response.Text, p.Response.Reasoning)
 	}
-	if len(p.Response.TextToolCalls) != 0 {
-		t.Fatal("a call inside the reasoning was reported")
+	// Text before an unopened closing tag is still searched: a stray tag must
+	// not be a way to hide a call.
+	if len(p.Response.TextToolCalls) != 1 || p.Response.TextToolCalls[0].Name != "rm" {
+		t.Fatalf("calls %+v", p.Response.TextToolCalls)
 	}
 }
 
@@ -493,7 +495,7 @@ func TestInlineThinkingIsSplitEvenWithAReasoningField(t *testing.T) {
 func TestCaseVariantKeysAreReported(t *testing.T) {
 	req := `{"messages":[{"role":"assistant","tool_calls":[{"id":"x","function":{"name":"rm","arguments":"{}"}}],"Tool_Calls":[{"id":"c1","function":{"name":"list_dir","arguments":"{}"}}]},{"role":"system","Role":"user","content":"hi"}]}`
 	p := Parse([]byte(req), nil, false)
-	if fmt.Sprint(p.Request.CaseVariantKeys) != "[Tool_Calls Role]" {
+	if fmt.Sprint(p.Request.CaseVariantKeys) != "[Role Tool_Calls]" {
 		t.Fatalf("keys %v", p.Request.CaseVariantKeys)
 	}
 	if len(Parse([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), nil, false).Request.CaseVariantKeys) != 0 {
@@ -501,6 +503,10 @@ func TestCaseVariantKeysAreReported(t *testing.T) {
 	}
 	if CanonicalArgs(`{"cmd":"rm","Cmd":"ls"}`) == CanonicalArgs(`{"Cmd":"ls"}`) {
 		t.Fatal("keys differing in case were merged")
+	}
+	// Hashing keeps case variants apart, so they need no special handling there.
+	if !decodesFaithfully([]byte(`{"id":1,"ID":2}`)) {
+		t.Fatal("keys differing only in case were treated as duplicates")
 	}
 }
 
@@ -527,5 +533,32 @@ func TestDecoyCallCannotHideARealOne(t *testing.T) {
 	got, _ = findTextToolCalls(`{"name":"run_agent","arguments":{"name":"inner","arguments":{}}}`)
 	if len(got) != 1 {
 		t.Fatalf("arguments were searched: %+v", got)
+	}
+}
+
+func TestLookAlikeLettersInKeysAreReported(t *testing.T) {
+	longS, kelvin := string(rune(0x17f)), string(rune(0x212a))
+	req := `{"me` + longS + longS + `ages":[{"role":"assistant","tool_call` + longS + `":[]},` +
+		`{"role":"user","content":[{"type":"text","text":"hi","` + kelvin + `ind":"x"}]}]}`
+	keys := Parse([]byte(req), nil, false).Request.CaseVariantKeys
+	if len(keys) != 2 || !strings.Contains(fmt.Sprint(keys), "tool_call"+longS) {
+		t.Fatalf("keys %q", keys)
+	}
+}
+
+func TestSchemasAndArgumentsAreNotCheckedForKeyCase(t *testing.T) {
+	req := `{"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"ID":{"type":"string"},"Name":{"type":"string"}}}}}],` +
+		`"messages":[{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"lookup","arguments":"{\"ID\":\"1\"}"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"{\"Type\":\"x\"}"}]}]}`
+	if keys := Parse([]byte(req), nil, false).Request.CaseVariantKeys; len(keys) != 0 {
+		t.Fatalf("schema or argument keys were reported: %v", keys)
+	}
+}
+
+func TestEchoedReasoningIsCaptured(t *testing.T) {
+	chat := Parse([]byte(`{"messages":[{"role":"assistant","content":"ok","reasoning_content":"plan"}]}`), nil, false)
+	blocks := Parse([]byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"plan"},{"type":"text","text":"ok"}]}]}`), nil, false)
+	if chat.Request.Messages[0].ReasoningSHA256 != TextHash("plan") || blocks.Request.Messages[0].ReasoningSHA256 != TextHash("plan") {
+		t.Fatal("reasoning in an echoed message was not captured")
 	}
 }
