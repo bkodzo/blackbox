@@ -187,6 +187,11 @@ func (r *Recorder) write(x record.Exchange) error {
 		return err
 	}
 	r.sessions.Commit(obs, e.Seq)
+	if parsed.Request.TooComplex {
+		// The turn was not checked, so later turns cannot be checked against
+		// the state before it.
+		r.sessions.Forget(call.Session.ID)
+	}
 	if call.Request.Body.Truncated || call.Response.Body.Truncated {
 		// Later turns cannot be checked against an incompletely stored turn;
 		// let the conversation start fresh instead of raising false alarms.

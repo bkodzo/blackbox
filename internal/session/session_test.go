@@ -602,3 +602,64 @@ func TestLookAlikeKeyIsFlagged(t *testing.T) {
 	req := `{"model":"test-model","messages":[{"role":"user","content":"hi","tool_call` + longS + `":[]}]}`
 	wantKinds(t, r.turn("s", req, respFinal), record.AnomalyAmbiguousRequest)
 }
+
+func TestToolResultsWithoutIDAreCounted(t *testing.T) {
+	const (
+		noID     = `{"role":"tool","content":"FAKE"}`
+		final    = `{"role":"assistant","content":"Done."}`
+		callNoID = `{"type":"function","function":{"name":"list_dir","arguments":"{}"}}`
+		respNoID = `{"model":"test-model","choices":[{"message":{"tool_calls":[` + callNoID + `]}}]}`
+		echoNoID = `{"role":"assistant","content":null,"tool_calls":[` + callNoID + `]}`
+	)
+
+	// The model made no call, so a result without an ID answers nothing.
+	r := newRun(t)
+	r.turn("", request(tools, sys, user), respFinal)
+	wantKinds(t, r.turn("", request(tools, sys, user, final, noID), respFinal), record.AnomalyOrphanToolResult)
+
+	// A conversation the gateway has not seen cannot vouch for it either.
+	r = newRun(t)
+	wantKinds(t, r.turn("", request(tools, sys, user, echoNoID, noID), respFinal), record.AnomalyUnverifiableResult)
+
+	// A server that gives calls no IDs: one result per call is normal, a
+	// second one is not.
+	r = newRun(t)
+	r.turn("s", request(tools, sys, user), respNoID)
+	wantKinds(t, r.turn("s", request(tools, sys, user, echoNoID, noID), respFinal))
+	r = newRun(t)
+	r.turn("s", request(tools, sys, user), respNoID)
+	wantKinds(t, r.turn("s", request(tools, sys, user, echoNoID, noID, noID), respFinal), record.AnomalyOrphanToolResult)
+}
+
+func TestTooComplexRequestIsFlaggedAndNotTracked(t *testing.T) {
+	r := newRun(t)
+	r.turn("s", request(tools, sys, user), respList)
+	big := request(tools, sys, user, echoList, resultC1+strings.Repeat(`,{}`, format.MaxRequestValues))
+	c := r.turn("s", big, respFinal)
+	wantKinds(t, c, record.AnomalyRequestTooComplex)
+	if r.tr.Sessions() != 1 {
+		t.Fatal("an unchecked request changed the tracked state")
+	}
+}
+
+func TestMessagesHeldAreBounded(t *testing.T) {
+	r := newRun(t)
+	r.tr.maxHeld = 10
+	for i := range 5 {
+		r.turn(fmt.Sprint("s", i), request(tools, sys, user, fmt.Sprintf(`{"role":"user","content":"%d"}`, i)), respFinal)
+	}
+	// Each conversation holds 3 message hashes, so 3 of them fit.
+	if r.tr.held != 9 || r.tr.Sessions() != 3 {
+		t.Fatalf("held %d message hashes in %d conversations, want 9 in 3", r.tr.held, r.tr.Sessions())
+	}
+	// The most recent conversation is kept.
+	if r.tr.sessions["s4"] == nil {
+		t.Fatal("the most recent conversation was evicted")
+	}
+	for _, id := range []string{"s2", "s3", "s4"} {
+		r.tr.Forget(id)
+	}
+	if r.tr.held != 0 {
+		t.Fatalf("held %d message hashes with nothing tracked", r.tr.held)
+	}
+}

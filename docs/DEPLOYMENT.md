@@ -15,6 +15,9 @@
 - **Control who can reach the gateway.** It has no authentication of its own;
   anyone who can reach it can use the model server through it. Bind it to
   localhost or a private network.
+- **Run one gateway per log.** The gateway locks its log, so a second one
+  pointed at the same file refuses to start. A supervisor that restarts the
+  gateway should wait for the old process to exit, or retry until it has.
 - **Give auditors the public key separately.** Verification is only as good as
   the public key it is checked against.
 

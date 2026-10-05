@@ -102,6 +102,13 @@ with, its own latest checkpoint, so it never extends a chain over a gap. These
 checks run before any crash repair, so a log that is refused is left exactly as
 it was found. A checkpoint file is required.
 
+Only one process may write a log. The gateway holds an exclusive lock on a
+file next to the log (`blackbox.jsonl.lock`) until it exits, and a second
+gateway pointed at the same log refuses to start. Without it, a restart that
+overlapped the old process's shutdown would fork the chain, and the log would
+fail verification for good. The lock is released when the process exits, even
+after a crash, so a stale lock file never blocks a restart.
+
 ### Durability and group commit
 
 Calling fsync after every entry is slow, especially on macOS, where Go uses
@@ -187,6 +194,13 @@ could grow the log without limit. Memory for bodies is bounded by roughly
 request and response), plus 256 MiB of exchanges waiting to be recorded and
 64 MiB of entries waiting to be written. Lower the limits on small hosts.
 
+Parsing a request takes several times the memory of the request itself, and
+most of that is per JSON value. A request with more than 200,000 values (real
+requests carry their bulk in strings and stay far below that) is recorded in
+full but not parsed; its turn is flagged `request_too_complex`, and a session
+it belongs to starts fresh. Conversations remember at most 1,000,000 message
+hashes in total (about 80 MB), evicting the least recently used.
+
 Shutdown waits a bounded time for calls in flight and for the recorder, so a
 disk that stops responding cannot keep the process from exiting; the gateway
 then exits with an error and without writing `gateway_stop`.
@@ -260,7 +274,9 @@ For each call the tracker checks that:
   (`orphan_tool_result`) and has not been answered before
   (`duplicate_tool_result`), and is linked to the entry where the call was
   made; results with no earlier turn to check against are flagged as
-  `unverifiable_tool_result` rather than trusted;
+  `unverifiable_tool_result` rather than trusted. A result without an ID
+  cannot be matched to a call, so there may be no more of them than calls the
+  model made last turn (`orphan_tool_result`);
 - the tools and leading system prompt have not changed, and no system or
   developer message was added mid-conversation;
 - no key in the parts of the request the parser reads (the request itself,

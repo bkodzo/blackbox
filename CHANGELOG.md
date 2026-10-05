@@ -19,6 +19,11 @@ First release.
   size, in-flight, and per-client limits, read, upstream, and response progress
   timeouts, and a bounded shutdown that records calls cancelled at the end of
   the grace period and counts requests refused for capacity.
+- An exclusive lock on the log, so two gateways can never write the same log
+  and fork its chain.
+- Bounded parsing and tracking: requests with too many JSON values are
+  recorded but not parsed, and the message hashes kept for conversations are
+  capped.
 - Protocol upgrades are refused by default, since their traffic cannot be
   recorded.
 - `blackbox verify`: single streaming pass, parallel signature checks, plain

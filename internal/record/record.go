@@ -249,6 +249,7 @@ const (
 	AnomalyTextCallExecuted    = "text_tool_call_executed"
 	AnomalyTextScanPartial     = "text_scan_partial"
 	AnomalyAmbiguousRequest    = "ambiguous_request"
+	AnomalyRequestTooComplex   = "request_too_complex"
 )
 
 // Exchange is one finished request and response as captured by the proxy,

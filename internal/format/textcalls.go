@@ -140,13 +140,14 @@ var toolShapes = []struct {
 	{"tool", []string{"tool_input"}},
 }
 
-// asToolCallFields accepts any of toolShapes, optionally wrapped as
+// asToolCallFields accepts any of toolShapes, optionally wrapped once as
 // {"function": {...}}, and returns the fields of obj that make up the call.
+// Deeper wrappers are found by collectCalls, which bounds the nesting.
 func asToolCallFields(obj map[string]json.RawMessage) (ToolCall, []string, bool) {
 	if fn, ok := obj["function"]; ok {
 		var inner map[string]json.RawMessage
 		if json.Unmarshal(fn, &inner) == nil {
-			if tc, _, ok := asToolCallFields(inner); ok {
+			if tc, ok := matchAnyShape(inner); ok {
 				return tc, []string{"function"}, true
 			}
 		}
@@ -157,6 +158,16 @@ func asToolCallFields(obj map[string]json.RawMessage) (ToolCall, []string, bool)
 		}
 	}
 	return ToolCall{}, nil, false
+}
+
+// matchAnyShape matches obj itself, without unwrapping, against toolShapes.
+func matchAnyShape(obj map[string]json.RawMessage) (ToolCall, bool) {
+	for _, shape := range toolShapes {
+		if tc, ok := matchShape(obj, shape.name, shape.args); ok {
+			return tc, true
+		}
+	}
+	return ToolCall{}, false
 }
 
 func matchShape(obj map[string]json.RawMessage, nameKey string, argKeys []string) (ToolCall, bool) {

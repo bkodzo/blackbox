@@ -33,6 +33,10 @@ const (
 	DefaultIdle = time.Hour // how long a conversation is remembered after its last call
 	MaxBranches = 32        // branches kept per conversation opening, oldest evicted first
 	MaxStates   = 10000     // conversations kept in total, least recently used evicted first
+	// MaxMessages bounds the message hashes kept across all conversations
+	// (about 80 bytes each); least recently used conversations are evicted
+	// first.
+	MaxMessages = 1_000_000
 )
 
 // toolCall identifies a tool call by ID, name, and canonical arguments.
@@ -68,6 +72,8 @@ type Tracker struct {
 	sessions  map[string]*state   // by session ID
 	convs     map[string][]*state // by conversation opening, for calls without a session ID
 	count     int
+	held      int // message hashes kept across all states
+	maxHeld   int // MaxMessages, lowered in tests
 	lastSweep time.Time
 	now       func() time.Time
 }
@@ -77,7 +83,7 @@ func New(idle time.Duration) *Tracker {
 	if idle <= 0 {
 		idle = DefaultIdle
 	}
-	return &Tracker{idle: idle, sessions: map[string]*state{}, convs: map[string][]*state{}, now: time.Now}
+	return &Tracker{idle: idle, maxHeld: MaxMessages, sessions: map[string]*state{}, convs: map[string][]*state{}, now: time.Now}
 }
 
 // Observation is the outcome of Observe, passed to Commit once the call has
@@ -116,6 +122,11 @@ type Observation struct {
 func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 	t.sweep()
 	callChecks(c)
+	if p.Request.TooComplex {
+		flag(c, record.AnomalyRequestTooComplex,
+			"the request has more than %d JSON values, so it was recorded but its conversation was not checked", format.MaxRequestValues)
+		return nil
+	}
 
 	msgs := p.Request.Messages
 	obs := &Observation{
@@ -303,9 +314,12 @@ func checkAdded(c *record.LLMCall, s *state, msgs []format.Message, start int, o
 	}
 
 	seen := map[string]bool{}
+	results, idless := 0, 0
 	for _, m := range added {
 		for _, id := range m.ToolResultFor {
+			results++
 			if id == "" {
+				idless++
 				continue
 			}
 			seq, ok := s.issued[id]
@@ -324,6 +338,16 @@ func checkAdded(c *record.LLMCall, s *state, msgs []format.Message, start int, o
 			seen[id] = true
 			obs.answered = append(obs.answered, id)
 		}
+	}
+	// Results without an ID cannot be matched to a call, but there can be no
+	// more results than calls the model made last turn.
+	calls := len(s.calls)
+	if echoAt >= 0 {
+		calls = len(added[echoAt].ToolCalls)
+	}
+	if extra := min(idless, results-calls); extra > 0 {
+		flag(c, record.AnomalyOrphanToolResult,
+			"%d tool result(s) without an ID, beyond the %d call(s) the model made in turn %d", extra, calls, s.turn)
 	}
 }
 
@@ -515,6 +539,7 @@ func (t *Tracker) CommitAt(obs *Observation, seq uint64, at time.Time) {
 	}
 	s.turn++
 	s.lastSeen, s.lastSeq = at, seq
+	t.held += len(obs.messages) - len(s.messages)
 	s.messages, s.tools, s.system = obs.messages, obs.tools, obs.system
 	s.calls, s.textCalls, s.text, s.textAlt = obs.calls, obs.textCalls, obs.text, obs.textAlt
 	s.reasoning = obs.reasoning
@@ -534,13 +559,18 @@ func (t *Tracker) CommitAt(obs *Observation, seq uint64, at time.Time) {
 	for _, id := range obs.answered {
 		s.answered[id] = true
 	}
+	for t.held > t.maxHeld && t.count > 1 {
+		t.remove(t.leastRecent(s))
+	}
 }
 
 // insert adds a new state, evicting the oldest branch of the same opening
 // and the least recently used conversation when limits are reached.
 func (t *Tracker) insert(s *state) {
 	if s.key != "" {
-		if _, ok := t.sessions[s.key]; !ok {
+		if old, ok := t.sessions[s.key]; ok {
+			t.held -= len(old.messages)
+		} else {
 			t.count++
 		}
 		t.sessions[s.key] = s
@@ -586,6 +616,7 @@ func (t *Tracker) remove(s *state) {
 		if t.sessions[s.key] == s {
 			delete(t.sessions, s.key)
 			t.count--
+			t.held -= len(s.messages)
 		}
 		return
 	}
@@ -593,6 +624,7 @@ func (t *Tracker) remove(s *state) {
 	if i := slices.Index(ss, s); i >= 0 {
 		ss = slices.Delete(ss, i, i+1)
 		t.count--
+		t.held -= len(s.messages)
 	}
 	if len(ss) == 0 {
 		delete(t.convs, s.root)

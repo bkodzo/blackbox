@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bkodzo/blackbox/internal/format"
 	"github.com/bkodzo/blackbox/internal/ledger"
 	"github.com/bkodzo/blackbox/internal/proxy"
 	"github.com/bkodzo/blackbox/internal/record"
@@ -275,5 +276,35 @@ func TestTruncatedTurnsResetTheirConversation(t *testing.T) {
 	}
 	if n := tracker.Sessions(); n != 0 {
 		t.Fatalf("rebuild: the conversation with a truncated turn is still tracked (%d)", n)
+	}
+}
+
+func TestTooComplexTurnsResetTheirSession(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log.jsonl")
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	l, _ := ledger.Open(logPath, priv, ledger.Options{})
+	rec := New(l, "gw", Options{})
+	submit := func(req, resp string) {
+		x := record.Exchange{Call: &record.LLMCall{Type: record.TypeLLMCall}, Req: []byte(req), Resp: []byte(resp)}
+		x.Call.Session.ID = "s"
+		x.Call.Timing.CompletedAt = time.Now()
+		x.Call.Request.Body.Text, x.Call.Response.Body.Text = req, resp
+		rec.Submit(x)
+	}
+	u := `{"role":"user","content":"hi"}`
+	submit(`{"messages":[`+u+`]}`, `{"choices":[{"message":{"content":"Hello."}}]}`)
+	submit(`{"messages":[`+u+strings.Repeat(`,{}`, format.MaxRequestValues)+`]}`, `{"choices":[{"message":{"content":"Bye."}}]}`)
+	rec.Close()
+	l.Close()
+	if n := rec.sessions.Sessions(); n != 0 {
+		t.Fatalf("live: the session with an unchecked turn is still tracked (%d)", n)
+	}
+	tracker, _, err := Rebuild(logPath, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := tracker.Sessions(); n != 0 {
+		t.Fatalf("rebuild: the session with an unchecked turn is still tracked (%d)", n)
 	}
 }

@@ -151,6 +151,7 @@ All times are RFC 3339 in UTC.
 | `text_tool_call_executed` | The agent ran a call the model only wrote as text |
 | `text_scan_partial` | The reply text could not be searched completely for tool calls written as text |
 | `ambiguous_request` | The request has keys that differ from known fields only in letter case |
+| `request_too_complex` | The request had too many JSON values to parse, so its conversation was not checked |
 | `history_rewritten` | An earlier message, or the model's tool calls or reply text, changed or was left out; or messages were attributed to the model that it never sent |
 | `history_truncated` | Older messages were dropped since the previous turn |
 | `toolset_changed` | The tools offered changed since the previous turn |

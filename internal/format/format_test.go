@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const chatRequest = `{
@@ -560,5 +561,82 @@ func TestEchoedReasoningIsCaptured(t *testing.T) {
 	blocks := Parse([]byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"plan"},{"type":"text","text":"ok"}]}]}`), nil, false)
 	if chat.Request.Messages[0].ReasoningSHA256 != TextHash("plan") || blocks.Request.Messages[0].ReasoningSHA256 != TextHash("plan") {
 		t.Fatal("reasoning in an echoed message was not captured")
+	}
+}
+
+func TestEqualFoldCoversTheDecoder(t *testing.T) {
+	// decodedAs skips keys that equal no field name under strings.EqualFold.
+	// That is safe only if the decoder never matches a character EqualFold
+	// does not. Check every character against every letter in field names.
+	type letters struct {
+		A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z *int
+	}
+	step := 1
+	if testing.Short() {
+		step = 7
+	}
+	for r := rune(0); r <= utf8.MaxRune; r += rune(step) {
+		if !utf8.ValidRune(r) || r == '"' || r == '\\' {
+			continue
+		}
+		b, _ := json.Marshal(map[string]int{string(r): 1})
+		var l letters
+		json.Unmarshal(b, &l)
+		v := reflect.ValueOf(l)
+		for i := range v.NumField() {
+			if name := strings.ToLower(v.Type().Field(i).Name); !v.Field(i).IsNil() && !strings.EqualFold(string(r), name) {
+				t.Fatalf("the decoder reads %U as %q, but EqualFold does not", r, name)
+			}
+		}
+	}
+}
+
+func TestJunkKeysAreNotCached(t *testing.T) {
+	before := probeCacheLen.Load()
+	var b strings.Builder
+	b.WriteString(`{"messages":[{"role":"user","content":"x"`)
+	for i := range 20000 {
+		fmt.Fprintf(&b, `,"junk%d":0`, i)
+	}
+	b.WriteString(`}]}`)
+	parseRequest([]byte(b.String()))
+	if grown := probeCacheLen.Load() - before; grown > 10 {
+		t.Fatalf("the key cache grew by %d entries for keys that match no field", grown)
+	}
+}
+
+func TestNestedWrappersAreBounded(t *testing.T) {
+	// Each wrapper level used to unwrap every level below it again.
+	text := strings.Repeat(`{"function":`, 5000) + "{}" + strings.Repeat("}", 5000)
+	resp, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": text}}}})
+	start := time.Now()
+	p := Parse([]byte(`{"messages":[]}`), resp, false)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("scanning nested wrappers took %v", d)
+	}
+	if !p.Response.TextScanPartial {
+		t.Fatal("a scan cut short by the nesting limit was not reported as partial")
+	}
+	// One wrapper still counts as a call, and so does a doubly wrapped one.
+	for _, s := range []string{
+		`{"function":{"name":"rm","arguments":{}}}`,
+		`{"function":{"function":{"name":"rm","arguments":{}}}}`,
+	} {
+		if calls, _ := findTextToolCalls(s); len(calls) != 1 || calls[0].Name != "rm" {
+			t.Fatalf("%s: found %+v", s, calls)
+		}
+	}
+}
+
+func TestManyValuesAreNotParsed(t *testing.T) {
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}` + strings.Repeat(`,{}`, MaxRequestValues) + `]}`
+	r, _, _ := parseRequest([]byte(body))
+	if !r.TooComplex || r.Model != "m" || !r.Stream || r.Messages != nil {
+		t.Fatalf("got %+v", r)
+	}
+	// Commas, colons, and brackets inside strings do not count.
+	s := `{"messages":[{"role":"user","content":"` + strings.Repeat(`[{,:\"`, MaxRequestValues) + `"}]}`
+	if r, _, _ := parseRequest([]byte(s)); r.TooComplex || len(r.Messages) != 1 {
+		t.Fatalf("text with JSON punctuation was counted: %+v", r.TooComplex)
 	}
 }

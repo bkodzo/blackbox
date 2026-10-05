@@ -67,7 +67,9 @@ Conversations are tracked with or without a session header, and the state is
 rebuilt from the log after a restart. These are flags for review, not blocks.
 They are heuristics about how agents and servers lay out messages: an unusual
 layout can be missed or flagged. The tamper-evident log is the guarantee; the
-anomaly checks guide review.
+anomaly checks guide review. A request too complex to parse is recorded in full and flagged
+`request_too_complex` instead of checked, so padding a request to avoid the
+checks is itself visible.
 
 ## Assumptions
 

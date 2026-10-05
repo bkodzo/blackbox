@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -55,7 +56,17 @@ type Request struct {
 	// letter case. blackbox's parser matches them case-insensitively, but a
 	// model server may not, so the two could read different content.
 	CaseVariantKeys []string
+	// TooComplex reports that the request held more than MaxRequestValues
+	// JSON values, so only its model and stream fields were read.
+	TooComplex bool
 }
+
+// MaxRequestValues bounds the JSON values in a request that are parsed.
+// Parsing builds several times more memory than the request takes, so a
+// request of many tiny messages, blocks, or keys could otherwise exhaust
+// memory or stall recording. Real requests carry their bulk in strings and
+// stay far below it.
+const MaxRequestValues = 200_000
 
 // ToolCall is a tool invocation requested by the model.
 type ToolCall struct {
@@ -157,6 +168,14 @@ type rawBlock struct {
 }
 
 func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
+	if countValues(body, MaxRequestValues) > MaxRequestValues {
+		var head struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		json.Unmarshal(body, &head)
+		return Request{Model: head.Model, Stream: head.Stream, TooComplex: true}, false, false
+	}
 	var raw rawRequest
 	if json.Unmarshal(body, &raw) != nil {
 		return r, false, false
@@ -185,7 +204,8 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 		for _, tc := range rm.ToolCalls {
 			msg.ToolCalls = append(msg.ToolCalls, ToolCall{tc.ID, tc.Function.Name, CanonicalArgs(tc.Function.Arguments)})
 		}
-		if rm.ToolCallID != "" {
+		if rm.ToolCallID != "" || rm.Role == "tool" {
+			// A tool message without an ID is still a result, counted as "".
 			msg.ToolResultFor = append(msg.ToolResultFor, rm.ToolCallID)
 		}
 		var blocks []rawBlock
@@ -236,6 +256,33 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 		r.ToolsSHA256 = hex.EncodeToString(all.Sum(nil))
 	}
 	return r, hasMessages, blockHints
+}
+
+// countValues counts the objects, arrays, keys, and elements in JSON body,
+// stopping once the count passes limit. It does not validate the JSON.
+func countValues(body []byte, limit int) int {
+	n := 0
+	inString, escaped := false, false
+	for _, c := range body {
+		switch {
+		case escaped:
+			escaped = false
+		case inString:
+			switch c {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[' || c == ',' || c == ':':
+			if n++; n > limit {
+				return n
+			}
+		}
+	}
+	return n
 }
 
 // CanonicalArgs normalizes tool call arguments so that the same arguments
@@ -785,11 +832,33 @@ type fieldProbe struct {
 
 var probeFields = reflect.TypeFor[fieldProbe]()
 
-// probeCache remembers decodedAs results; keys repeat across messages.
-var probeCache sync.Map
+// probeNames are the JSON names of the fieldProbe fields.
+var probeNames = func() []string {
+	names := make([]string, probeFields.NumField())
+	for i := range names {
+		names[i] = probeFields.Field(i).Tag.Get("json")
+	}
+	return names
+}()
+
+// probeCache remembers decodedAs results for keys that could match a field.
+// Keys come from agents, so it holds at most probeCacheMax of them.
+var (
+	probeCache    sync.Map
+	probeCacheLen atomic.Int64
+)
+
+const probeCacheMax = 4096
 
 // decodedAs returns the field name Go's decoder would fill for key, or "".
 func decodedAs(key string) string {
+	// The decoder folds each character of a key the way strings.EqualFold
+	// does or more narrowly, so a key that equals no field name under
+	// EqualFold is never read as a field. This is checked rune by rune in
+	// TestEqualFoldCoversTheDecoder.
+	if !slices.ContainsFunc(probeNames, func(n string) bool { return strings.EqualFold(n, key) }) {
+		return ""
+	}
 	if v, ok := probeCache.Load(key); ok {
 		return v.(string)
 	}
@@ -804,7 +873,11 @@ func decodedAs(key string) string {
 			break
 		}
 	}
-	probeCache.Store(key, name)
+	if probeCacheLen.Load() < probeCacheMax {
+		if _, loaded := probeCache.LoadOrStore(key, name); !loaded {
+			probeCacheLen.Add(1)
+		}
+	}
 	return name
 }
 

@@ -102,6 +102,7 @@ unrecorded.
 | `text_tool_call_executed` | The agent ran a call the model only wrote as text |
 | `text_scan_partial` | The reply was too long or complex to search completely for tool calls written as text |
 | `ambiguous_request` | The request has keys that differ from expected fields only in letter case, so the model server may read it differently |
+| `request_too_complex` | The request had too many JSON values to parse, so it was recorded but not checked |
 
 Anomalies are flags for review, and blackbox never blocks a call. They come
 from heuristics about how agents and servers lay out messages, so they can miss
