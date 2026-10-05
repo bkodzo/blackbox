@@ -19,6 +19,10 @@ in the file are rejected.
 | `--max-request` | `max_request_bytes` | 64 MiB | Larger requests are refused with 413 and recorded |
 | `--max-in-flight` | `max_in_flight` | `64` | Requests handled at once; more are refused with 503 and recorded |
 | `--checkpoint-stdout` | `checkpoint_stdout` | `true` | Also print checkpoints to stdout |
+| `--checkpoint-records` | `checkpoint_records` | `100` | Write a checkpoint at least every this many entries |
+| `--checkpoint-interval` | `checkpoint_interval` | `30s` | Write a checkpoint at least this often while entries are written |
+| `--stream-idle-timeout` | `stream_idle_timeout` | `5m` | Cancel a response that makes no progress for this long |
+| `--allow-upgrades` | `allow_upgrades` | `false` | Allow protocol upgrades, whose traffic is not recorded (default: refuse with 501) |
 | `--fail-open` | `fail_open` | `false` | Keep forwarding if the log fails (default: refuse and exit) |
 | `--body-read-timeout` | `body_read_timeout` | `1m` | Limit for reading a request body |
 | `--upstream-timeout` | `upstream_timeout` | `10m` | Limit for the model server to start responding |
@@ -67,7 +71,10 @@ not listed are recorded as `unknown`.
 | 0 | The log is intact |
 | 1 | The log or its checkpoints were tampered with |
 | 2 | The log is intact, with warnings (for example an unclean shutdown) |
-| 3 | Verification could not run (missing file, bad flag) |
+| 3 | Verification could not run (missing log, key, or checkpoint file, or a bad flag) |
+
+`verify` requires the checkpoint file. Pass `--no-checkpoints` to verify a log
+without one; removals from the end of the log then cannot be detected.
 
 ## Health endpoint
 

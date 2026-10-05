@@ -77,7 +77,8 @@ that gap: rebuilding the chain requires the private key.
 Neither chaining nor signatures detect entries removed from the end of the log,
 because what remains is still a valid, signed prefix. Checkpoints cover that.
 
-After a durable flush, at most every 1,000 entries or 5 minutes, the ledger
+After a durable flush, at least every 100 entries or 30 seconds while entries
+are being written (both configurable), the ledger
 writes a checkpoint to a separate file and, by default, to stdout so a copy
 leaves the machine. The stdout copy is written from its own goroutine; if the
 reader stalls or the pipe closes, lines are counted as dropped and shutdown
@@ -173,7 +174,9 @@ calls that could not be recorded, and calls cancelled.
 | Stored body size | 32 MiB | Bodies beyond this are truncated in the log; hashes cover every byte |
 | Request body read | 1 minute | A slow client cannot hold a request open indefinitely |
 | Upstream response headers | 10 minutes | A model server that never answers frees its slot |
+| Response progress | 5 minutes | A response that stalls, or a client that stops reading, is cancelled and recorded, freeing its slot |
 | Idle connections | 2 minutes | |
+| Protocol upgrades | refused | Traffic after a switch to another protocol could not be recorded; `--allow-upgrades` permits it |
 
 ## Format parsing
 
@@ -228,8 +231,12 @@ For each call the tracker checks that:
 
 - the history sent last turn is sent again unchanged, or with older turns
   dropped while keeping the opening (`history_truncated`), and not otherwise
-  changed (`history_rewritten`). Without a session ID, a request that diverges
-  from every known branch is checked against the closest one;
+  changed (`history_rewritten`). Without a session ID, conversations are
+  related only through a model reply blackbox has verified: a request that
+  diverges from every branch after such a reply is checked against the
+  closest one, and one whose first model reply differs from every reply the
+  model gave to that opening is flagged. Example replies an agent writes into
+  its prompt do not relate conversations;
 - the messages added since the last turn contain exactly one model message,
   the echo of the model's last reply, placed first; results sent without it,
   messages placed before it, or further messages attributed to the model are
@@ -242,7 +249,14 @@ For each call the tracker checks that:
   made; results with no earlier turn to check against are flagged as
   `unverifiable_tool_result` rather than trusted;
 - the tools and leading system prompt have not changed, and no system or
-  developer message was added mid-conversation.
+  developer message was added mid-conversation;
+- no key in the request differs from a known field only in letter case
+  (`ambiguous_request`). The parser would match such a key, but a model server
+  might not, so the two could read different content.
+
+Text the agent sends is always compared as sent. A model reply written with
+inline reasoning may be echoed with or without that reasoning, and both forms
+are accepted, but text the agent adds inside think tags is never ignored.
 
 Servers that return tool calls without IDs are handled by matching the agent's
 echoed calls by name and arguments and adopting the IDs the agent assigned. An

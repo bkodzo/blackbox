@@ -101,6 +101,7 @@ unrecorded.
 | `tool_call_in_text` | The model wrote a tool call into its reply text instead of making one |
 | `text_tool_call_executed` | The agent ran a call the model only wrote as text |
 | `text_scan_partial` | The reply was too long or complex to search completely for tool calls written as text |
+| `ambiguous_request` | The request has keys that differ from expected fields only in letter case, so the model server may read it differently |
 
 Anomalies are flags for review; blackbox never blocks a call.
 

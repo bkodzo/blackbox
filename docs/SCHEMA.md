@@ -34,6 +34,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `quarantined_bytes` | Bytes of an incomplete final line moved out of the log at startup |
 | `quarantine_file` | Where those bytes were saved |
 | `quarantine_sha256` | Hash of those bytes |
+| `checkpoint_torn_bytes` | Bytes of an incomplete final checkpoint line removed at startup |
 
 ## gateway_stop
 
@@ -112,7 +113,7 @@ making it. The agent may not have run it.
 
 | Field | Meaning |
 |---|---|
-| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, `client_aborted`, `gateway_shutdown`, `request_too_large`, or `gateway_busy` |
+| `error.class` | `upstream_unreachable`, `upstream_status`, `upstream_read`, `client_aborted`, `gateway_shutdown`, `request_too_large`, `gateway_busy`, `upgrade_refused`, or `stream_idle` |
 | `error.message` | Detail |
 | `timing.received_at` | Request received by the gateway |
 | `timing.upstream_sent_at` | Request sent to the model server |
@@ -147,6 +148,7 @@ All times are RFC 3339 in UTC.
 | `duplicate_tool_result` | Another result arrived for a tool call that was already answered |
 | `text_tool_call_executed` | The agent ran a call the model only wrote as text |
 | `text_scan_partial` | The reply text could not be searched completely for tool calls written as text |
+| `ambiguous_request` | The request has keys that differ from known fields only in letter case |
 | `history_rewritten` | An earlier message, or the model's tool calls or reply text, changed or was left out; or messages were attributed to the model that it never sent |
 | `history_truncated` | Older messages were dropped since the previous turn |
 | `toolset_changed` | The tools offered changed since the previous turn |

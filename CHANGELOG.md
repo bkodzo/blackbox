@@ -16,8 +16,10 @@ First release.
 - Fails closed: if the log cannot be written, new requests are refused, calls
   in flight are cancelled, and the gateway exits. `--fail-open` is available.
 - Group commit with bounded buffers, a byte-bounded recording queue, request
-  size limits, read and upstream timeouts, and a shutdown that records calls
-  cancelled at the end of the grace period.
+  size and in-flight limits, read, upstream, and response progress timeouts,
+  and a shutdown that records calls cancelled at the end of the grace period.
+- Protocol upgrades are refused by default, since their traffic cannot be
+  recorded.
 - `blackbox verify`: single streaming pass, parallel signature checks, plain
   language results, and exit codes for intact, tampered, warnings, and errors.
 - Extraction of model, token usage, tool calls, and system prompt and tool

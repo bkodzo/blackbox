@@ -71,12 +71,19 @@ rebuilt from the log after a restart. These are flags for review, not blocks.
 - **The private key is protected.** It is created with owner-only permissions.
   An attacker who has the key can write a log that verifies. Keep it on the
   gateway host only, outside the log's directory, and rotate it if the host may
-  be compromised.
+  be compromised. A new key starts a new log file; the gateway will not
+  continue a log signed by another key.
 - **The auditor's public key is genuine.** Verification against an attacker's
   public key proves nothing. Distribute the public key separately from the log.
 - **Checkpoints leave the gateway host.** If the attacker controls every copy of
   the checkpoints, they can truncate the log and the checkpoint file together.
   Ship checkpoints from stdout to a log collector or another machine.
+- **Entries newer than the last checkpoint are not yet protected against
+  removal.** Someone who controls the gateway host can kill it and cut entries
+  written since the last checkpoint; on restart this looks like a crash (an
+  unclean shutdown warning). Checkpoints are written at least every 100 entries
+  or 30 seconds by default; lower `--checkpoint-records` or
+  `--checkpoint-interval` to narrow the window.
 - **Agents go through the gateway.** blackbox records only traffic sent to it.
   Network policy should make the gateway the only route to the model server.
 - **Access to the gateway is controlled.** The gateway has no authentication of
@@ -100,6 +107,9 @@ rebuilt from the log after a restart. These are flags for review, not blocks.
   call at the same time, history checks can raise false alarms. Sub-agents
   should use their own session ID with `X-Blackbox-Parent-Session`, or send no
   session ID and let conversations be tracked by content.
+- **Protocol upgrades.** Refused by default. With `--allow-upgrades`, traffic
+  after a switch to another protocol (a WebSocket, for example) is passed
+  through but not recorded; only the request that asked for it is.
 - **Crash window.** The agent receives its response before the record is
   durable. A hard crash can lose calls still queued in the recorder and the
   current 50 ms write batch. The loss is flagged at the next start. `--sync
