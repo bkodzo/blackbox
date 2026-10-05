@@ -49,6 +49,7 @@ type state struct {
 	textCalls []toolCall // tool calls the model wrote as text last turn
 	text      string     // hash of the model's reply text last turn, as returned
 	textAlt   string     // the same without inline reasoning, which agents may strip
+	reasoning []string   // hashes of the reasoning the model returned last turn
 	// verifiedReply is the index of the first message in the history that
 	// blackbox checked as an echo of a real model reply, or -1. Conversations
 	// without a session ID are related only through such a reply; example
@@ -92,11 +93,16 @@ type Observation struct {
 	text      string
 	textAlt   string
 	echoIdx   int // index of the echo checked in this request, or -1
-	tools     string
-	system    string
-	adopted   map[string]uint64 // IDs the agent assigned to calls the model returned without IDs
-	answered  []string          // tool call IDs answered by this request
-	failed    bool              // the call got no reply; the conversation state is left unchanged
+	reasoning []string
+	// For a new branch made by trimming: the first model reply in the kept
+	// history, or -1.
+	branchVerified int
+	committed      *state // the state Commit wrote, for Drop
+	tools          string
+	system         string
+	adopted        map[string]uint64 // IDs the agent assigned to calls the model returned without IDs
+	answered       []string          // tool call IDs answered by this request
+	failed         bool              // the call got no reply; the conversation state is left unchanged
 	// For a new branch: the issued and answered tool calls it shares with the
 	// branch it diverged from.
 	inheritIssued   map[string]uint64
@@ -119,6 +125,12 @@ func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 		failed:  c.Error != nil,
 	}
 	obs.text, obs.textAlt = format.ReplyHashes(p.Response.FullText, p.Response.Text)
+	for _, r := range []string{p.Response.Reasoning, p.Response.ReasoningField} {
+		if h := format.TextHash(r); h != "" {
+			obs.reasoning = append(obs.reasoning, h)
+		}
+	}
+	obs.branchVerified = -1
 	if keys := p.Request.CaseVariantKeys; len(keys) > 0 {
 		flag(c, record.AnomalyAmbiguousRequest,
 			"the request has keys that differ from expected fields only in letter case (%s); the model server may read different content than was checked",
@@ -161,10 +173,19 @@ func (t *Tracker) Observe(c *record.LLMCall, p format.Parsed) *Observation {
 				obs.branch = true
 				obs.inheritIssued, obs.inheritAnswered = shared(s, msgs[:n])
 			case closest.verifiedReply == n && n < len(msgs) && msgs[n].Role == "assistant":
-				// Same opening, but the first reply attributed to the model is
-				// not one it gave in any branch of this conversation.
-				flag(c, record.AnomalyHistoryRewritten,
-					"message %d is attributed to the model, but the model gave a different reply to this conversation's opening", n+1)
+				// Same opening, and the first model reply differs. That is
+				// either context trimming (older turns dropped, newer ones
+				// kept) or a reply the model never gave.
+				var trial record.LLMCall
+				if trimmed := historyCheck(&trial, closest, obs.messages, msgs); trimmed >= 0 {
+					c.Anomalies = append(c.Anomalies, trial.Anomalies...)
+					s, start, obs.branch = closest, trimmed, true
+					obs.inheritIssued, obs.inheritAnswered = shared(s, msgs[:trimmed])
+					obs.branchVerified = slices.IndexFunc(msgs[:trimmed], func(m format.Message) bool { return m.Role == "assistant" })
+				} else {
+					flag(c, record.AnomalyHistoryRewritten,
+						"message %d is attributed to the model, but the model gave a different reply to this conversation's opening", n+1)
+				}
 			}
 			// Otherwise the two share only their opening and are unrelated.
 		}
@@ -362,6 +383,9 @@ func checkEcho(c *record.LLMCall, s *state, echo format.Message) map[string]uint
 				"tool call %s %s returned by the model is missing from the echoed reply", mc.name, clip(mc.args))
 		}
 	}
+	if echo.ReasoningSHA256 != "" && !slices.Contains(s.reasoning, echo.ReasoningSHA256) {
+		flag(c, record.AnomalyHistoryRewritten, "the echoed reply carries reasoning the model did not return")
+	}
 	switch {
 	case echo.TextSHA256 == s.text || echo.TextSHA256 == s.textAlt:
 	case s.text == "":
@@ -477,7 +501,11 @@ func (t *Tracker) CommitAt(obs *Observation, seq uint64, at time.Time) {
 		n := &state{key: obs.sessionID, root: obs.root, issued: map[string]uint64{}, answered: map[string]bool{}, verifiedReply: -1}
 		if s != nil {
 			n.turn, n.verifiedReply = s.turn, s.verifiedReply
+			if obs.branchVerified >= 0 {
+				n.verifiedReply = obs.branchVerified
+			}
 			n.calls, n.textCalls, n.text, n.textAlt, n.replied = s.calls, s.textCalls, s.text, s.textAlt, s.replied
+			n.reasoning = s.reasoning
 			maps.Copy(n.issued, obs.inheritIssued)
 			maps.Copy(n.answered, obs.inheritAnswered)
 		}
@@ -489,6 +517,8 @@ func (t *Tracker) CommitAt(obs *Observation, seq uint64, at time.Time) {
 	s.lastSeen, s.lastSeq = at, seq
 	s.messages, s.tools, s.system = obs.messages, obs.tools, obs.system
 	s.calls, s.textCalls, s.text, s.textAlt = obs.calls, obs.textCalls, obs.text, obs.textAlt
+	s.reasoning = obs.reasoning
+	obs.committed = s
 	s.replied = len(obs.calls) > 0 || obs.text != ""
 	if s.verifiedReply < 0 && obs.echoIdx >= 0 {
 		s.verifiedReply = obs.echoIdx
@@ -571,27 +601,34 @@ func (t *Tracker) remove(s *state) {
 	}
 }
 
-// Forget drops what is known about a session, so its next call is treated
-// as the start of a conversation.
-func (t *Tracker) Forget(sessionID string) {
-	if s, ok := t.sessions[sessionID]; ok && sessionID != "" {
-		t.remove(s)
+// Drop removes the state a committed observation wrote, so the
+// conversation's next call starts fresh. Used when a turn was stored
+// incompletely and later turns cannot be checked against it.
+func (t *Tracker) Drop(obs *Observation) {
+	if obs != nil && obs.committed != nil {
+		t.remove(obs.committed)
 	}
 }
 
-// ForgetConversation drops every branch of the conversation a request
-// without a session ID belongs to. With no messages to identify it, it drops
-// every conversation tracked without a session ID.
-func (t *Tracker) ForgetConversation(msgs []format.Message) {
-	if len(msgs) == 0 {
-		for _, ss := range t.convs {
+// ForgetConversationID drops every branch of the conversation with the given
+// identifier, as recorded in session.conversation.
+func (t *Tracker) ForgetConversationID(id string) {
+	if id == "" {
+		return
+	}
+	for root, ss := range t.convs {
+		if strings.HasPrefix(root, id) {
 			for _, s := range slices.Clone(ss) {
 				t.remove(s)
 			}
 		}
-		return
 	}
-	for _, s := range slices.Clone(t.convs[conversationRoot(msgs)]) {
+}
+
+// Forget drops what is known about a session, so its next call is treated
+// as the start of a conversation.
+func (t *Tracker) Forget(sessionID string) {
+	if s, ok := t.sessions[sessionID]; ok && sessionID != "" {
 		t.remove(s)
 	}
 }

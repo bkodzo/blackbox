@@ -245,29 +245,35 @@ func TestReasoningSummary(t *testing.T) {
 	}
 }
 
-func TestRebuildForgetsConversationsWithTruncatedTurns(t *testing.T) {
+func TestTruncatedTurnsResetTheirConversation(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "log.jsonl")
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	l, _ := ledger.Open(logPath, priv, ledger.Options{})
-	write := func(req, resp string, truncated bool) {
-		c := record.LLMCall{Type: record.TypeLLMCall, Timing: record.Timing{CompletedAt: time.Now()}}
-		c.Request.Body.Text, c.Response.Body.Text, c.Response.Body.Truncated = req, resp, truncated
-		b, _ := json.Marshal(c)
-		l.Append(b)
+	rec := New(l, "gw", Options{})
+	submit := func(req, resp string, truncated bool) {
+		x := record.Exchange{Call: &record.LLMCall{Type: record.TypeLLMCall}, Req: []byte(req), Resp: []byte(resp)}
+		x.Call.Timing.CompletedAt = time.Now()
+		x.Call.Request.Body.Text, x.Call.Response.Body.Text = req, resp // as the proxy stores them
+		x.Call.Response.Body.Truncated = truncated
+		rec.Submit(x)
 	}
 	u := `{"role":"user","content":"hi"}`
 	echo1 := `{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"list_dir","arguments":"{}"}}]}`
 	res1 := `{"role":"tool","tool_call_id":"c1","content":"a"}`
-	write(`{"messages":[`+u+`]}`, `{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"list_dir","arguments":"{}"}}]}}]}`, false)
-	write(`{"messages":[`+u+`,`+echo1+`,`+res1+`]}`, `{"choices":[{"message":{"tool_calls":[{"id":"c2","function":{"name":"rea`, true)
+	submit(`{"messages":[`+u+`]}`, `{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"list_dir","arguments":"{}"}}]}}]}`, false)
+	submit(`{"messages":[`+u+`,`+echo1+`,`+res1+`]}`, `{"choices":[{"message":{"tool_calls":[{"id":"c2","function":{"name":"rea`, true)
+	rec.Close()
 	l.Close()
+	if n := rec.sessions.Sessions(); n != 0 {
+		t.Fatalf("live: the conversation with a truncated turn is still tracked (%d)", n)
+	}
 
 	tracker, _, err := Rebuild(logPath, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tracker.Sessions() != 0 {
-		t.Fatalf("the conversation with a truncated turn is still tracked (%d)", tracker.Sessions())
+	if n := tracker.Sessions(); n != 0 {
+		t.Fatalf("rebuild: the conversation with a truncated turn is still tracked (%d)", n)
 	}
 }

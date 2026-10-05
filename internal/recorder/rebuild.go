@@ -57,10 +57,8 @@ func Rebuild(path string, idle time.Duration) (*session.Tracker, int, error) {
 			// as unseen.
 			if c.Session.ID != "" {
 				t.Forget(c.Session.ID)
-			} else if c.Request.Body.Truncated {
-				t.ForgetConversation(nil) // cannot tell which conversation it was
 			} else {
-				t.ForgetConversation(format.Parse(bodyBytes(c.Request.Body), nil, false).Request.Messages)
+				t.ForgetConversationID(c.Session.Conversation)
 			}
 			return nil
 		}

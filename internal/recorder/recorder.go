@@ -171,6 +171,11 @@ func (r *Recorder) write(x record.Exchange) error {
 		return err
 	}
 	r.sessions.Commit(obs, e.Seq)
+	if call.Request.Body.Truncated || call.Response.Body.Truncated {
+		// Later turns cannot be checked against an incompletely stored turn;
+		// let the conversation start fresh instead of raising false alarms.
+		r.sessions.Drop(obs)
+	}
 	r.calls.Add(1)
 	return nil
 }
