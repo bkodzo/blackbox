@@ -100,11 +100,12 @@ type Recovery struct {
 // is full. (On some systems a write blocks while an fsync of the same file is
 // in progress, so even the write must happen outside mu.)
 type Ledger struct {
-	opt Options
-	key ed25519.PrivateKey
-	kid string
-	f   *os.File
-	rec Recovery
+	opt  Options
+	key  ed25519.PrivateKey
+	kid  string
+	f    *os.File
+	lock *os.File // held until Close, so only one process writes the log
+	rec  Recovery
 
 	mu      sync.Mutex // guards the fields below
 	drained *sync.Cond // signalled when pend is swapped out or the ledger fails
@@ -151,12 +152,17 @@ var ErrClosed = errors.New("ledger: closed")
 // extended over the gap.
 func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 	opt.setDefaults()
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	lk, err := lock(path)
 	if err != nil {
 		return nil, err
 	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		closeLock(lk)
+		return nil, err
+	}
 	pub := key.Public().(ed25519.PublicKey)
-	l := &Ledger{opt: opt, key: key, kid: KeyID(pub), f: f, head: make([]byte, sha256.Size), cpTime: time.Now()}
+	l := &Ledger{opt: opt, key: key, kid: KeyID(pub), f: f, lock: lk, head: make([]byte, sha256.Size), cpTime: time.Now()}
 	l.drained = sync.NewCond(&l.mu)
 
 	// Work out the log's state and any repair it needs, check it against the
@@ -164,7 +170,7 @@ func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 	// is left exactly as it was found.
 	fix, err := l.inspect(pub)
 	if err != nil {
-		f.Close()
+		l.closeFiles()
 		return nil, err
 	}
 	if err := l.openCheckpoints(pub); err != nil {
@@ -669,5 +675,12 @@ func (l *Ledger) closeFiles() error {
 	if l.cp != nil {
 		err = errors.Join(err, l.cp.Close())
 	}
+	closeLock(l.lock) // last, once nothing more will be written
 	return err
+}
+
+func closeLock(f *os.File) {
+	if f != nil {
+		f.Close()
+	}
 }

@@ -673,3 +673,26 @@ func TestFailedRepairLeavesCheckpointsUntouched(t *testing.T) {
 		t.Fatal("a failed repair changed the checkpoint file")
 	}
 }
+
+func TestSecondWriterIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log.jsonl")
+	_, key, _ := ed25519.GenerateKey(nil)
+	opt := Options{CheckpointPath: filepath.Join(dir, "cp.jsonl")}
+	a, err := Open(path, key, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := Open(path, key, opt); err == nil {
+		b.Close()
+		t.Fatal("a second gateway opened a log that is already being written")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Open(path, key, opt)
+	if err != nil {
+		t.Fatalf("log not usable after the first writer closed: %v", err)
+	}
+	b.Close()
+}
