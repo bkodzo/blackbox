@@ -48,7 +48,9 @@ func findTextToolCalls(text string) (calls []ToolCall, partial bool) {
 			i++
 			continue
 		}
-		collectCalls(raw, 0, &calls)
+		if collectCalls(raw, 0, &calls) {
+			partial = true
+		}
 		i += int(dec.InputOffset())
 	}
 	return calls, partial
@@ -66,35 +68,65 @@ func (m *meteredReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// collectCalls finds tool call shapes in a JSON value. A value that is a
-// call is not searched further, so a call's own arguments are never counted
-// as more calls.
-func collectCalls(raw json.RawMessage, depth int, out *[]ToolCall) {
+// collectCalls finds tool call shapes in a JSON value and reports whether
+// the depth limit cut the search short. A call's own name and arguments are
+// not searched, so its arguments are never counted as more calls, but its
+// other fields are, so a decoy call cannot hide a real one inside it.
+func collectCalls(raw json.RawMessage, depth int, out *[]ToolCall) (cut bool) {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) == nil {
-		if tc, ok := asToolCall(obj); ok {
+		skip := map[string]bool{}
+		if tc, used, ok := asToolCallFields(obj); ok {
 			*out = append(*out, tc)
-			return
-		}
-		if depth >= maxNesting {
-			return
+			for _, k := range used {
+				skip[k] = true
+			}
 		}
 		keys := make([]string, 0, len(obj))
 		for k := range obj {
-			keys = append(keys, k)
+			if !skip[k] && isContainer(obj[k]) {
+				keys = append(keys, k)
+			}
+		}
+		if len(keys) > 0 && depth >= maxNesting {
+			return true
 		}
 		slices.Sort(keys) // a stable order for the results
 		for _, k := range keys {
-			collectCalls(obj[k], depth+1, out)
+			cut = collectCalls(obj[k], depth+1, out) || cut
 		}
-		return
+		return cut
 	}
 	var arr []json.RawMessage
-	if depth < maxNesting && json.Unmarshal(raw, &arr) == nil {
+	if json.Unmarshal(raw, &arr) == nil {
+		var elems []json.RawMessage
 		for _, x := range arr {
-			collectCalls(x, depth+1, out)
+			if isContainer(x) {
+				elems = append(elems, x)
+			}
+		}
+		if len(elems) > 0 && depth >= maxNesting {
+			return true
+		}
+		for _, x := range elems {
+			cut = collectCalls(x, depth+1, out) || cut
 		}
 	}
+	return cut
+}
+
+// isContainer reports whether raw is a JSON object or array.
+func isContainer(raw json.RawMessage) bool {
+	for _, c := range raw {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // toolShapes are the field pairs models use when writing a call as JSON:
@@ -108,21 +140,23 @@ var toolShapes = []struct {
 	{"tool", []string{"tool_input"}},
 }
 
-// asToolCall accepts any of toolShapes, optionally wrapped as
-// {"function": {...}}.
-func asToolCall(obj map[string]json.RawMessage) (ToolCall, bool) {
+// asToolCallFields accepts any of toolShapes, optionally wrapped as
+// {"function": {...}}, and returns the fields of obj that make up the call.
+func asToolCallFields(obj map[string]json.RawMessage) (ToolCall, []string, bool) {
 	if fn, ok := obj["function"]; ok {
 		var inner map[string]json.RawMessage
 		if json.Unmarshal(fn, &inner) == nil {
-			obj = inner
+			if tc, _, ok := asToolCallFields(inner); ok {
+				return tc, []string{"function"}, true
+			}
 		}
 	}
 	for _, shape := range toolShapes {
 		if tc, ok := matchShape(obj, shape.name, shape.args); ok {
-			return tc, true
+			return tc, append([]string{shape.name}, shape.args...), true
 		}
 	}
-	return ToolCall{}, false
+	return ToolCall{}, nil, false
 }
 
 func matchShape(obj map[string]json.RawMessage, nameKey string, argKeys []string) (ToolCall, bool) {

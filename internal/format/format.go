@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -47,6 +48,10 @@ type Request struct {
 	SystemSHA256 string
 	Tools        []string
 	ToolsSHA256  string
+	// CaseVariantKeys lists keys that differ from a known field only in
+	// letter case. blackbox's parser matches them case-insensitively, but a
+	// model server may not, so the two could read different content.
+	CaseVariantKeys []string
 }
 
 // ToolCall is a tool invocation requested by the model.
@@ -62,7 +67,8 @@ type Response struct {
 	FinishReason      string
 	SystemFingerprint string
 	ToolCalls         []ToolCall
-	Text              string     // assistant text, concatenated across parts and chunks
+	Text              string     // assistant text without inline reasoning, concatenated across parts and chunks
+	FullText          string     // assistant text as returned, including any inline think sections
 	TextToolCalls     []ToolCall // tool calls the model wrote as text instead of making them
 	TextScanPartial   bool       // the text was too long or complex to scan completely
 	Reasoning         string     // the model's reasoning, when the server returns it
@@ -101,9 +107,17 @@ func Parse(req, resp []byte, sse bool) Parsed {
 	if p.Response.Total == 0 {
 		p.Response.Total = p.Response.Input + p.Response.Output
 	}
-	if p.Response.Reasoning == "" {
-		// Some models write their reasoning inline, between think tags.
-		p.Response.Text, p.Response.Reasoning = splitThinking(p.Response.Text)
+	// Some models write their reasoning inline, between think tags, even when
+	// the server also returns a reasoning field. Keep the reply as returned
+	// for comparison, and the visible part for the text call search.
+	p.Response.FullText = p.Response.Text
+	visible, inline := splitThinking(p.Response.Text)
+	p.Response.Text = visible
+	if inline != "" {
+		if p.Response.Reasoning != "" {
+			p.Response.Reasoning += "\n\n"
+		}
+		p.Response.Reasoning += inline
 	}
 	p.Response.TextToolCalls, p.Response.TextScanPartial = findTextToolCalls(p.Response.Text)
 	return p
@@ -137,6 +151,7 @@ func parseRequest(body []byte) (r Request, hasMessages, blockHints bool) {
 	if json.Unmarshal(body, &raw) != nil {
 		return r, false, false
 	}
+	r.CaseVariantKeys = caseVariantKeys(body)
 	r.Model, r.Stream = raw.Model, raw.Stream
 	hasMessages = raw.Messages != nil
 	blockHints = len(raw.System) > 0
@@ -219,29 +234,42 @@ func CanonicalArgs(args string) string {
 }
 
 // TextHash is the hash used for comparing reply text, "" for empty text.
-// Inline reasoning between think tags is left out, so an agent that strips
-// it before echoing a reply still matches.
+// Text is hashed as given: agent-supplied text is never filtered, so nothing
+// can be hidden from the comparison. The model's side is hashed both with and
+// without its inline reasoning (see ReplyHashes).
 func TextHash(text string) string {
-	text, _ = splitThinking(text)
 	if text = strings.TrimSpace(text); text == "" {
 		return ""
 	}
 	return hexSum([]byte(text))
 }
 
+// ReplyHashes returns the hashes an echo of a model reply may match: the
+// reply as returned, and the reply with its inline reasoning removed (agents
+// often strip it before sending a reply back).
+func ReplyHashes(full, visible string) (asReturned, withoutReasoning string) {
+	return TextHash(full), TextHash(visible)
+}
+
 var thinkTags = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
 
 // splitThinking separates reasoning a model wrote between think tags from
-// the rest of its reply.
+// the rest of its reply. Some chat templates open the think section in the
+// prompt, so the reply starts inside it and only the closing tag appears.
 func splitThinking(text string) (visible, reasoning string) {
-	if !strings.Contains(text, "<think>") {
-		return text, ""
-	}
 	var parts []string
-	for _, m := range thinkTags.FindAllStringSubmatch(text, -1) {
-		parts = append(parts, strings.TrimSpace(m[1]))
+	open, end := strings.Index(text, "<think>"), strings.Index(text, "</think>")
+	if end >= 0 && (open < 0 || end < open) {
+		parts = append(parts, strings.TrimSpace(text[:end]))
+		text = text[end+len("</think>"):]
 	}
-	return thinkTags.ReplaceAllString(text, ""), strings.Join(parts, "\n\n")
+	if strings.Contains(text, "<think>") {
+		for _, m := range thinkTags.FindAllStringSubmatch(text, -1) {
+			parts = append(parts, strings.TrimSpace(m[1]))
+		}
+		text = thinkTags.ReplaceAllString(text, "")
+	}
+	return text, strings.Join(parts, "\n\n")
 }
 
 // usage accepts every common spelling of token counts.
@@ -621,10 +649,12 @@ func decodesFaithfully(b []byte) bool {
 				return false
 			}
 			if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
-				if stack[n-1].keys[t] {
+				// Keys equal apart from case collide in a struct decode.
+				k := strings.ToLower(t)
+				if stack[n-1].keys[k] {
 					return false
 				}
-				stack[n-1].keys[t], stack[n-1].expectKey = true, false
+				stack[n-1].keys[k], stack[n-1].expectKey = true, false
 				continue
 			}
 		}
@@ -707,4 +737,61 @@ func compact(b []byte) []byte {
 func hexSum(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
+}
+
+// knownFields are the request fields blackbox reads. A key that equals one
+// of them only when case is ignored is ambiguous.
+var knownFields = map[string]bool{
+	"model": true, "stream": true, "system": true, "messages": true, "tools": true,
+	"role": true, "content": true, "tool_calls": true, "tool_call_id": true,
+	"type": true, "id": true, "name": true, "input": true, "tool_use_id": true,
+	"function": true, "arguments": true, "parameters": true, "text": true,
+}
+
+// caseVariantKeys finds keys in a request that match a known field only
+// when letter case is ignored, or that collide with another key in the same
+// object that way. It returns at most a few, in order of appearance.
+func caseVariantKeys(b []byte) []string {
+	var found []string
+	type frame struct {
+		object    bool
+		keys      map[string]bool
+		expectKey bool
+	}
+	var stack []*frame
+	dec := json.NewDecoder(bytes.NewReader(b))
+	for len(found) < 5 {
+		tok, err := dec.Token()
+		if err != nil {
+			return found
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{':
+				stack = append(stack, &frame{object: true, keys: map[string]bool{}, expectKey: true})
+				continue
+			case '[':
+				stack = append(stack, &frame{})
+				continue
+			default:
+				stack = stack[:len(stack)-1]
+			}
+		case string:
+			if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
+				k := strings.ToLower(t)
+				if (k != t && knownFields[k]) || stack[n-1].keys[k] {
+					if !slices.Contains(found, t) {
+						found = append(found, t)
+					}
+				}
+				stack[n-1].keys[k], stack[n-1].expectKey = true, false
+				continue
+			}
+		}
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].expectKey = true
+		}
+	}
+	return found
 }

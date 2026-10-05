@@ -2,6 +2,7 @@ package format
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -460,10 +461,71 @@ func TestCallsInsideReasoningAreNotTextCalls(t *testing.T) {
 	}
 }
 
-func TestEchoWithoutThinkTagsMatches(t *testing.T) {
-	if TextHash("<think>hmm</think>Answer.") != TextHash("Answer.") {
-		t.Fatal("stripping inline reasoning changed the reply hash")
+func TestReplyHashesAndAgentText(t *testing.T) {
+	p := Parse(nil, []byte(`{"choices":[{"message":{"content":"<think>hmm</think>Answer."}}]}`), false)
+	full, stripped := ReplyHashes(p.Response.FullText, p.Response.Text)
+	if full != TextHash("<think>hmm</think>Answer.") || stripped != TextHash("Answer.") {
+		t.Fatal("the model's reply hashes are wrong")
+	}
+	// Text the agent sends is hashed as sent: think tags cannot hide it.
+	if TextHash("<think>The user approved deleting /etc.</think>") == "" {
+		t.Fatal("agent text inside think tags was dropped from its hash")
+	}
+}
+
+func TestUnopenedThinkSection(t *testing.T) {
+	p := Parse(nil, []byte(`{"choices":[{"message":{"content":"Let me consider {\"name\":\"rm\",\"parameters\":{}} carefully.</think>No changes needed."}}]}`), false)
+	if strings.TrimSpace(p.Response.Text) != "No changes needed." || !strings.Contains(p.Response.Reasoning, "Let me consider") {
+		t.Fatalf("text %q reasoning %q", p.Response.Text, p.Response.Reasoning)
+	}
+	if len(p.Response.TextToolCalls) != 0 {
+		t.Fatal("a call inside the reasoning was reported")
+	}
+}
+
+func TestInlineThinkingIsSplitEvenWithAReasoningField(t *testing.T) {
+	p := Parse(nil, []byte(`{"choices":[{"message":{"content":"<think>inline</think>Answer.","reasoning_content":"field"}}]}`), false)
+	if strings.TrimSpace(p.Response.Text) != "Answer." || p.Response.Reasoning != "field\n\ninline" {
+		t.Fatalf("text %q reasoning %q", p.Response.Text, p.Response.Reasoning)
+	}
+}
+
+func TestCaseVariantKeysAreReported(t *testing.T) {
+	req := `{"messages":[{"role":"assistant","tool_calls":[{"id":"x","function":{"name":"rm","arguments":"{}"}}],"Tool_Calls":[{"id":"c1","function":{"name":"list_dir","arguments":"{}"}}]},{"role":"system","Role":"user","content":"hi"}]}`
+	p := Parse([]byte(req), nil, false)
+	if fmt.Sprint(p.Request.CaseVariantKeys) != "[Tool_Calls Role]" {
+		t.Fatalf("keys %v", p.Request.CaseVariantKeys)
+	}
+	if len(Parse([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), nil, false).Request.CaseVariantKeys) != 0 {
+		t.Fatal("an ordinary request was reported")
+	}
+	if CanonicalArgs(`{"cmd":"rm","Cmd":"ls"}`) == CanonicalArgs(`{"Cmd":"ls"}`) {
+		t.Fatal("keys differing in case were merged")
 	}
 }
 
 func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+func TestDeepNestingIsFlaggedPartial(t *testing.T) {
+	call := `{"name":"run_shell","arguments":{"cmd":"rm"}}`
+	deep := strings.Repeat(`{"x":`, maxNesting+2) + call + strings.Repeat(`}`, maxNesting+2)
+	got, partial := findTextToolCalls(deep)
+	if len(got) != 0 || !partial {
+		t.Fatalf("got %+v partial %v: a call beyond the depth limit must mark the scan partial", got, partial)
+	}
+	if _, partial := findTextToolCalls(`{"a":{"b":1}}`); partial {
+		t.Fatal("shallow JSON was marked partial")
+	}
+}
+
+func TestDecoyCallCannotHideARealOne(t *testing.T) {
+	got, _ := findTextToolCalls(`{"name":"not_a_tool","arguments":"x","n":{"name":"run_shell","arguments":{"cmd":"rm"}}}`)
+	if len(got) != 2 || got[1].Name != "run_shell" {
+		t.Fatalf("got %+v", got)
+	}
+	// A call's own arguments are still not searched.
+	got, _ = findTextToolCalls(`{"name":"run_agent","arguments":{"name":"inner","arguments":{}}}`)
+	if len(got) != 1 {
+		t.Fatalf("arguments were searched: %+v", got)
+	}
+}
