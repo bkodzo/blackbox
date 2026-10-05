@@ -31,6 +31,9 @@ type GatewayStart struct {
 	// CheckpointTornBytes counts bytes of an incomplete final checkpoint line
 	// removed at startup.
 	CheckpointTornBytes int64 `json:"checkpoint_torn_bytes,omitempty"`
+	// CheckpointsMissing is set when the log had entries but its checkpoint
+	// file did not exist and was created empty.
+	CheckpointsMissing bool `json:"checkpoints_missing,omitempty"`
 }
 
 // GatewayStop is written on clean shutdown.
@@ -44,6 +47,9 @@ type GatewayStop struct {
 	// AbortedAtShutdown counts calls still in flight when the shutdown grace
 	// period ended; they were cancelled and recorded as aborted.
 	AbortedAtShutdown uint64 `json:"aborted_at_shutdown,omitempty"`
+	// Refused counts requests turned away because a capacity limit was
+	// reached. They were never forwarded, so they have no records of their own.
+	Refused uint64 `json:"refused,omitempty"`
 }
 
 // LLMCall is one exchange between an agent and the model server.
@@ -200,7 +206,6 @@ const (
 	ErrorClientAborted       = "client_aborted"
 	ErrorGatewayShutdown     = "gateway_shutdown"
 	ErrorRequestTooLarge     = "request_too_large"
-	ErrorGatewayBusy         = "gateway_busy"
 	ErrorUpgradeRefused      = "upgrade_refused"
 	ErrorStreamIdle          = "stream_idle"
 )

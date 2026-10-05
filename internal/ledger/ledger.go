@@ -87,6 +87,9 @@ type Recovery struct {
 	// removed after the checks passed. A checkpoint only restates a signed
 	// entry, so nothing is lost.
 	CheckpointTornBytes int64
+	// CheckpointsMissing is set when the log had entries but the checkpoint
+	// file did not exist and was created empty.
+	CheckpointsMissing bool
 }
 
 // Ledger appends entries to a log file. It is safe for concurrent use.
@@ -115,12 +118,14 @@ type Ledger struct {
 	err     error // sticky: once a write fails, the ledger stops accepting
 	closing bool
 
-	syncMu  sync.Mutex // serializes flushes; guards the fields below
-	spare   []byte     // reused as the next pend buffer
-	durable *Entry     // newest entry known to be on disk
-	cp      *os.File
-	cpSeq   uint64
-	cpTime  time.Time
+	syncMu         sync.Mutex // serializes flushes; guards the fields below
+	spare          []byte     // reused as the next pend buffer
+	durable        *Entry     // newest entry known to be on disk
+	cp             *os.File
+	cpTorn         int64 // bytes of an incomplete final checkpoint line, removed after Open's checks
+	cpUnterminated bool  // the final checkpoint line is valid but lacks its newline
+	cpSeq          uint64
+	cpTime         time.Time
 
 	mirror        chan []byte
 	mirrorDone    chan struct{}
@@ -167,6 +172,10 @@ func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 		return nil, err
 	}
 	if err := l.repair(path, fix); err != nil {
+		l.closeFiles()
+		return nil, err
+	}
+	if err := l.finishCheckpoints(); err != nil {
 		l.closeFiles()
 		return nil, err
 	}
@@ -320,14 +329,17 @@ func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
 	if l.opt.CheckpointPath == "" {
 		return nil
 	}
+	_, statErr := os.Stat(l.opt.CheckpointPath)
+	l.rec.CheckpointsMissing = errors.Is(statErr, os.ErrNotExist) && l.seq > 0
 	var err error
 	if l.cp, err = os.OpenFile(l.opt.CheckpointPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600); err != nil {
 		return err
 	}
-	cps, torn, err := readCheckpoints(l.cp)
+	cps, torn, unterminated, err := readCheckpointFile(l.cp)
 	if err != nil {
 		return fmt.Errorf("ledger: %s: %w", l.opt.CheckpointPath, err)
 	}
+	l.cpTorn, l.cpUnterminated = torn, unterminated
 	for _, c := range cps {
 		if err := c.verify(pub, l.kid); err != nil {
 			return fmt.Errorf("ledger: %v; run `blackbox verify`", err)
@@ -344,18 +356,31 @@ func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
 		}
 		l.cpSeq = max(l.cpSeq, c.Seq)
 	}
-	if torn > 0 {
-		// Only now that the log is accepted: drop an interrupted checkpoint
-		// write so the file stays parseable. Truncate by path, since an
-		// append-only handle cannot truncate on Windows.
+	return nil
+}
+
+// finishCheckpoints tidies the end of the checkpoint file once the log has
+// been accepted and repaired: it ends a valid final line that lacked its
+// newline, or removes an interrupted one. A checkpoint only restates a
+// signed entry, so removing a partial one loses nothing.
+func (l *Ledger) finishCheckpoints() error {
+	switch {
+	case l.cp == nil:
+	case l.cpUnterminated:
+		if _, err := l.cp.Write([]byte{'\n'}); err != nil {
+			return err
+		}
+		return l.cp.Sync()
+	case l.cpTorn > 0:
 		st, err := l.cp.Stat()
 		if err != nil {
 			return err
 		}
-		if err := os.Truncate(l.opt.CheckpointPath, st.Size()-torn); err != nil {
+		// Truncate by path, since an append-only handle cannot on Windows.
+		if err := os.Truncate(l.opt.CheckpointPath, st.Size()-l.cpTorn); err != nil {
 			return err
 		}
-		l.rec.CheckpointTornBytes = torn
+		l.rec.CheckpointTornBytes = l.cpTorn
 	}
 	return nil
 }

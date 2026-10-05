@@ -137,6 +137,7 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		QuarantineSHA256: recovery.QuarantineSHA256,
 
 		CheckpointTornBytes: recovery.CheckpointTornBytes,
+		CheckpointsMissing:  recovery.CheckpointsMissing,
 	}
 	// gateway_start, with any recovery it describes, is on disk before the
 	// first request is served.
@@ -153,6 +154,9 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 	}
 	if start.QuarantinedBytes > 0 {
 		log.Printf("warning: moved %d bytes of an incomplete final log line to %s", start.QuarantinedBytes, start.QuarantineFile)
+	}
+	if start.CheckpointsMissing {
+		log.Printf("warning: the checkpoint file %s was missing and has been created empty", cfg.Checkpoints)
 	}
 	if start.RepairedSeq > 0 {
 		log.Printf("warning: entry %d was missing its final newline; added it", start.RepairedSeq)
@@ -184,6 +188,7 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		MaxBody:         cfg.MaxBody,
 		MaxRequest:      cfg.MaxRequest,
 		MaxInFlight:     cfg.MaxInFlight,
+		MaxPerClient:    cfg.MaxPerClient,
 		StreamIdle:      time.Duration(cfg.StreamIdle),
 		AllowUpgrades:   cfg.AllowUpgrades,
 		BodyReadTimeout: time.Duration(cfg.BodyReadTimeout),
@@ -251,12 +256,22 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 	}
 	cancelBase(proxy.ErrShutdown)
 	srv.Close() // closes connections Shutdown left open, so no request arrives late
-	px.Close()  // refuses anything that still does, and waits for calls in flight
-	rec.Close()
+	// Refuse anything that still arrives and wait for calls in flight, then
+	// for the recorder. Both are bounded, so a stalled disk cannot keep the
+	// process from exiting.
+	grace := time.Duration(cfg.ShutdownTimeout)
+	if !px.Close(grace) {
+		log.Printf("calls were still in flight after the grace period; they may be missing from the log")
+		code = 1
+	}
+	if !rec.CloseWithin(grace) {
+		log.Printf("the audit log did not finish writing; exiting without gateway_stop")
+		return 1
+	}
 
 	stopRec := record.GatewayStop{
 		Type: record.TypeGatewayStop, Time: time.Now().UTC(), InstanceID: instance,
-		Calls: rec.Calls(), Unrecorded: rec.Unrecorded(), AbortedAtShutdown: px.Aborted(),
+		Calls: rec.Calls(), Unrecorded: rec.Unrecorded(), AbortedAtShutdown: px.Aborted(), Refused: px.Refused(),
 	}
 	if auditErr() == nil {
 		if err := appendJSON(l, stopRec); err != nil {

@@ -620,3 +620,56 @@ func TestBrokenMirrorIsCountedNotFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUnterminatedCheckpointIsKept(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, 3)
+	b, _ := os.ReadFile(f.cps)
+	os.WriteFile(f.cps, bytes.TrimSuffix(b, []byte("\n")), 0o600) // removing the newline must not hide it
+	cps, torn, err := ReadCheckpoints(f.cps)
+	if err != nil || len(cps) != 1 || torn != 0 {
+		t.Fatalf("cps %d torn %d err %v", len(cps), torn, err)
+	}
+	f.write(t, 1) // Open ends the line, so the next checkpoint starts on its own line
+	if cps, _, err := ReadCheckpoints(f.cps); err != nil || len(cps) != 2 {
+		t.Fatalf("after reopening: %d checkpoints, err %v", len(cps), err)
+	}
+	if _, err := f.verify(t); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMissingCheckpointFileIsRecorded(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, 2)
+	os.Remove(f.cps)
+	l := f.open(t, Options{})
+	defer l.Close()
+	if !l.Recovery().CheckpointsMissing {
+		t.Fatal("a deleted checkpoint file was not reported")
+	}
+}
+
+func TestFailedRepairLeavesCheckpointsUntouched(t *testing.T) {
+	if os.PathSeparator != '/' || os.Getuid() == 0 {
+		t.Skip("needs a read-only directory")
+	}
+	f := newFixture(t)
+	f.write(t, 3)
+	fh, _ := os.OpenFile(f.log, os.O_APPEND|os.O_WRONLY, 0)
+	fh.WriteString(`{"v":2,"seq":4,"kid":"ab`) // a torn log line needs a quarantine file
+	fh.Close()
+	fh, _ = os.OpenFile(f.cps, os.O_APPEND|os.O_WRONLY, 0)
+	fh.WriteString(`{"v":2,"log":"ab`) // and a torn checkpoint line
+	fh.Close()
+	before, _ := os.ReadFile(f.cps)
+
+	os.Chmod(f.dir, 0o500) // the quarantine file cannot be created
+	defer os.Chmod(f.dir, 0o700)
+	if _, err := Open(f.log, f.priv, Options{CheckpointPath: f.cps}); err == nil {
+		t.Fatal("Open succeeded although the repair could not be saved")
+	}
+	if after, _ := os.ReadFile(f.cps); string(after) != string(before) {
+		t.Fatal("a failed repair changed the checkpoint file")
+	}
+}

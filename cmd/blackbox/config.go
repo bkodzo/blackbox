@@ -50,6 +50,7 @@ type config struct {
 	MaxBody         int64    `json:"max_body_bytes"`
 	MaxRequest      int64    `json:"max_request_bytes"`
 	MaxInFlight     int      `json:"max_in_flight"`
+	MaxPerClient    int      `json:"max_per_client"`
 	AllowUpgrades   bool     `json:"allow_upgrades"`
 	CheckpointEvery uint64   `json:"checkpoint_records"`
 	CheckpointAfter duration `json:"checkpoint_interval"`
@@ -69,8 +70,9 @@ func defaultConfig() config {
 		Key:             filepath.Join(keyDir(), "key.ed25519"),
 		Sync:            "group",
 		MaxBody:         32 << 20,
-		MaxRequest:      64 << 20,
-		MaxInFlight:     64,
+		MaxRequest:      32 << 20,
+		MaxInFlight:     32,
+		MaxPerClient:    8,
 		CheckpointEvery: 100,
 		CheckpointAfter: duration(30 * time.Second),
 		StreamIdle:      duration(5 * time.Minute),
@@ -100,8 +102,9 @@ func serveFlags(fs *flag.FlagSet, f *config) *string {
 	fs.StringVar(&f.Risk, "risk", "", "risk map JSON file")
 	fs.StringVar(&f.Sync, "sync", "", `"group" (batched fsync, default) or "always" (fsync every record)`)
 	fs.Int64Var(&f.MaxBody, "max-body", 0, "bytes of each body to store (default 32 MiB); hashes always cover all bytes")
-	fs.Int64Var(&f.MaxRequest, "max-request", 0, "largest request accepted (default 64 MiB); larger ones get 413")
-	fs.IntVar(&f.MaxInFlight, "max-in-flight", 0, "requests handled at once (default 64); more get 503")
+	fs.Int64Var(&f.MaxRequest, "max-request", 0, "largest request accepted (default 32 MiB); larger ones get 413")
+	fs.IntVar(&f.MaxInFlight, "max-in-flight", 0, "requests handled at once (default 32); more get 503")
+	fs.IntVar(&f.MaxPerClient, "max-per-client", 0, "requests handled at once for one client address (default 8)")
 	fs.BoolVar(&f.AllowUpgrades, "allow-upgrades", false, "allow protocol upgrades, whose traffic is not recorded (default: refuse with 501)")
 	fs.Uint64Var(&f.CheckpointEvery, "checkpoint-records", 0, "write a checkpoint at least every this many entries (default 100)")
 	fs.Var(&f.CheckpointAfter, "checkpoint-interval", "write a checkpoint at least this often while entries are written (default 30s)")
@@ -157,6 +160,8 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 			c.MaxRequest = flags.MaxRequest
 		case "max-in-flight":
 			c.MaxInFlight = flags.MaxInFlight
+		case "max-per-client":
+			c.MaxPerClient = flags.MaxPerClient
 		case "allow-upgrades":
 			c.AllowUpgrades = flags.AllowUpgrades
 		case "checkpoint-records":
@@ -184,7 +189,7 @@ func loadConfig(path string, fs *flag.FlagSet, flags *config) (config, error) {
 		return c, errors.New("a checkpoint file is required: without one, entries removed from the end of the log cannot be detected")
 	case c.Sync != "group" && c.Sync != "always":
 		return c, errors.New(`sync must be "group" or "always"`)
-	case c.MaxBody <= 0 || c.MaxRequest <= 0 || c.MaxInFlight <= 0:
+	case c.MaxBody <= 0 || c.MaxRequest <= 0 || c.MaxInFlight <= 0 || c.MaxPerClient <= 0:
 		return c, errors.New("body, request, and in-flight limits must be positive")
 	case c.BodyReadTimeout <= 0 || c.UpstreamTimeout <= 0 || c.ShutdownTimeout <= 0 || c.StreamIdle <= 0 || c.CheckpointAfter <= 0:
 		return c, errors.New("timeouts and intervals must be positive")

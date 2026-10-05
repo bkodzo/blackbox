@@ -145,3 +145,35 @@ func TestShowPrintsReasoning(t *testing.T) {
 		t.Fatalf("show output %q", out)
 	}
 }
+
+func TestUncoveredCleanShutdownIsTampering(t *testing.T) {
+	logPath, cpPath, pubPath := logFixture(t)
+	// A second run, so there are two checkpoints.
+	key, _ := ledger.LoadPrivateKey(filepath.Join(filepath.Dir(pubPath), "key.ed25519"))
+	l, err := ledger.Open(logPath, key, ledger.Options{CheckpointPath: cpPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []string{`{"type":"gateway_start"}`, `{"type":"llm_call"}`, `{"type":"gateway_stop"}`} {
+		l.Append([]byte(rec))
+	}
+	l.Close()
+	args := []string{"--log", logPath, "--checkpoints", cpPath, "--pub", pubPath}
+	if code := runVerify(args); code != exitIntact {
+		t.Fatalf("intact: exit %d", code)
+	}
+
+	// Removing the newest checkpoint's newline changes nothing.
+	b, _ := os.ReadFile(cpPath)
+	os.WriteFile(cpPath, []byte(strings.TrimSuffix(string(b), "\n")), 0o600)
+	if code := runVerify(args); code != exitIntact {
+		t.Fatalf("checkpoint without its newline: exit %d", code)
+	}
+
+	// Deleting the newest checkpoint leaves a clean shutdown no checkpoint covers.
+	lines := strings.SplitAfter(string(b), "\n")
+	os.WriteFile(cpPath, []byte(lines[0]), 0o600)
+	if code := runVerify(args); code != exitTampered {
+		t.Fatalf("newest checkpoint deleted: exit %d", code)
+	}
+}

@@ -43,10 +43,11 @@ const (
 // Defaults for Config.
 const (
 	DefaultMaxBody         = 32 << 20
-	DefaultMaxRequest      = 64 << 20
+	DefaultMaxRequest      = 32 << 20 // equal to DefaultMaxBody, so requests are never stored truncated
 	DefaultBodyReadTimeout = time.Minute
 	DefaultUpstreamTimeout = 10 * time.Minute
-	DefaultMaxInFlight     = 64
+	DefaultMaxInFlight     = 32
+	DefaultMaxPerClient    = 8
 	DefaultStreamIdle      = 5 * time.Minute
 )
 
@@ -72,7 +73,12 @@ type Config struct {
 	// MaxInFlight bounds requests handled at once, and so memory: at most
 	// MaxInFlight * (MaxRequest + MaxBody) bytes of bodies. Requests beyond
 	// it are refused with 503 and recorded.
-	MaxInFlight     int
+	MaxInFlight int
+	// MaxPerClient bounds requests handled at once for one client address,
+	// so a single client cannot take every slot (for example with slow
+	// uploads). Requests beyond either limit are refused with 503 and
+	// counted, not recorded one by one, so a flood cannot grow the log.
+	MaxPerClient    int
 	BodyReadTimeout time.Duration // limit for reading a request body
 	UpstreamTimeout time.Duration // limit for the upstream's response headers
 	// StreamIdle bounds how long a response may go without progress in
@@ -93,8 +99,10 @@ type Proxy struct {
 	slots    chan struct{}
 	mu       sync.Mutex // guards closing, and inflight.Add against Close
 	closing  bool
+	clients  map[string]int // requests in flight per client address
 	inflight sync.WaitGroup
 	aborted  atomic.Uint64
+	refused  atomic.Uint64 // requests refused for capacity
 }
 
 type ctxKey struct{}
@@ -116,6 +124,9 @@ func New(cfg Config) *Proxy {
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = DefaultMaxInFlight
 	}
+	if cfg.MaxPerClient <= 0 {
+		cfg.MaxPerClient = DefaultMaxPerClient
+	}
 	if cfg.StreamIdle <= 0 {
 		cfg.StreamIdle = DefaultStreamIdle
 	}
@@ -130,7 +141,7 @@ func New(cfg Config) *Proxy {
 		t.ResponseHeaderTimeout = cfg.UpstreamTimeout
 		base = t
 	}
-	p := &Proxy{cfg: cfg, slots: make(chan struct{}, cfg.MaxInFlight)}
+	p := &Proxy{cfg: cfg, slots: make(chan struct{}, cfg.MaxInFlight), clients: map[string]int{}}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:   p.rewrite,
 		Transport: timedTransport{base},
@@ -144,17 +155,36 @@ func New(cfg Config) *Proxy {
 	return p
 }
 
-// Close refuses new requests, then waits until every request being handled
-// has finished and been handed to the sink.
-func (p *Proxy) Close() {
+// Close refuses new requests, then waits up to d for every request being
+// handled to finish and be handed to the sink. It reports whether they did.
+func (p *Proxy) Close(d time.Duration) bool {
 	p.mu.Lock()
 	p.closing = true
 	p.mu.Unlock()
-	p.inflight.Wait()
+	done := make(chan struct{})
+	go func() {
+		p.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // Aborted reports calls cancelled with ErrShutdown.
 func (p *Proxy) Aborted() uint64 { return p.aborted.Load() }
+
+// Refused reports requests refused because a capacity limit was reached.
+func (p *Proxy) Refused() uint64 { return p.refused.Load() }
+
+// busy refuses a request for capacity. It is counted rather than recorded.
+func (p *Proxy) busy(w http.ResponseWriter, why string) {
+	p.refused.Add(1)
+	http.Error(w, "blackbox: "+why, http.StatusServiceUnavailable)
+}
 
 // exchange is the per-request state. All access happens on the handler
 // goroutine (ReverseProxy calls hooks and reads the body there).
@@ -186,15 +216,29 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	client := clientAddr(r)
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
 		http.Error(w, "blackbox: the gateway is shutting down", http.StatusServiceUnavailable)
 		return
 	}
+	if p.clients[client] >= p.cfg.MaxPerClient {
+		p.mu.Unlock()
+		p.busy(w, "too many requests from this client")
+		return
+	}
+	p.clients[client]++
 	p.inflight.Add(1)
 	p.mu.Unlock()
-	defer p.inflight.Done()
+	defer func() {
+		p.mu.Lock()
+		if p.clients[client]--; p.clients[client] == 0 {
+			delete(p.clients, client)
+		}
+		p.mu.Unlock()
+		p.inflight.Done()
+	}()
 
 	received := time.Now().UTC()
 	ctx, cancel := context.WithCancelCause(r.Context())
@@ -210,10 +254,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p.slots <- struct{}{}:
 		defer func() { <-p.slots }()
 	default:
-		ex.call.Error = &record.Error{Class: record.ErrorGatewayBusy, Message: "too many requests in flight"}
-		ex.call.Response.Status = http.StatusServiceUnavailable
-		http.Error(w, "blackbox: too many requests in flight", http.StatusServiceUnavailable)
-		p.finish(ex, false)
+		p.busy(w, "too many requests in flight")
 		return
 	}
 
@@ -277,10 +318,7 @@ func (p *Proxy) stored(b []byte) []byte {
 
 func newCall(r *http.Request, upstream *url.URL, received time.Time) *record.LLMCall {
 	h := r.Header
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		ip = r.RemoteAddr
-	}
+	ip := clientAddr(r)
 	return &record.LLMCall{
 		Type:         record.TypeLLMCall,
 		Agent:        record.Agent{ID: h.Get(HeaderAgent), Version: h.Get(HeaderAgentVersion)},
@@ -497,4 +535,13 @@ func randomHex(n int) string {
 func sha256Hex(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
+}
+
+// clientAddr is the address a request came from, without its port.
+func clientAddr(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
 }

@@ -56,19 +56,33 @@ func ReadCheckpoints(path string) ([]Checkpoint, int64, error) {
 }
 
 func readCheckpoints(r io.Reader) ([]Checkpoint, int64, error) {
-	var cps []Checkpoint
+	cps, torn, _, err := readCheckpointFile(r)
+	return cps, torn, err
+}
+
+// readCheckpointFile reads checkpoint lines. A final line without its
+// newline is kept if it is a valid checkpoint (unterminated is then set), so
+// removing a newline cannot hide the newest checkpoint; otherwise its length
+// is returned as torn.
+func readCheckpointFile(r io.Reader) (cps []Checkpoint, torn int64, unterminated bool, err error) {
 	br := bufio.NewReader(r)
 	for n := 1; ; n++ {
 		line, err := br.ReadBytes('\n')
 		if err == io.EOF {
-			return cps, int64(len(line)), nil
+			if len(line) == 0 {
+				return cps, 0, false, nil
+			}
+			if c, perr := parseCheckpoint(line); perr == nil {
+				return append(cps, c), 0, true, nil
+			}
+			return cps, int64(len(line)), false, nil
 		}
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 		c, err := parseCheckpoint(bytes.TrimSuffix(line, []byte{'\n'}))
 		if err != nil {
-			return nil, 0, &VerifyError{0, fmt.Sprintf("checkpoint line %d is not a valid checkpoint: %v", n, err)}
+			return nil, 0, false, &VerifyError{0, fmt.Sprintf("checkpoint line %d is not a valid checkpoint: %v", n, err)}
 		}
 		cps = append(cps, c)
 	}

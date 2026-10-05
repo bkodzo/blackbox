@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/bkodzo/blackbox/internal/format"
@@ -95,15 +96,30 @@ func (r *Recorder) Submit(x record.Exchange) {
 
 // Close records everything already queued, then stops. Later Submit calls
 // are counted as unrecorded.
-func (r *Recorder) Close() {
+func (r *Recorder) Close() { r.CloseWithin(-1) }
+
+// CloseWithin is Close that gives up after d (d < 0 waits indefinitely),
+// for example when the disk has stopped responding. It reports whether
+// everything queued was handled.
+func (r *Recorder) CloseWithin(d time.Duration) bool {
 	r.mu.Lock()
 	r.closed = true
 	r.cond.Broadcast()
 	r.mu.Unlock()
-	<-r.done
+	if d < 0 {
+		<-r.done
+	} else {
+		select {
+		case <-r.done:
+		case <-time.After(d):
+			log.Printf("blackbox: the audit log did not finish writing; queued records may be missing")
+			return false
+		}
+	}
 	if n := r.unrecorded.Load(); n > 0 {
 		log.Printf("blackbox: %d audit records were not written", n)
 	}
+	return true
 }
 
 // Calls returns how many calls have been written.
