@@ -1,6 +1,8 @@
 # blackbox
 
 [![ci](https://github.com/bkodzo/blackbox/actions/workflows/ci.yml/badge.svg)](https://github.com/bkodzo/blackbox/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/bkodzo/blackbox)](https://github.com/bkodzo/blackbox/releases/latest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/bkodzo/blackbox.svg)](https://pkg.go.dev/github.com/bkodzo/blackbox)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 blackbox is an audit gateway for AI agents. It sits between an agent and any
