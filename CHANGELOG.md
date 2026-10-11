@@ -24,6 +24,9 @@ First release.
 - Bounded parsing and tracking: requests with too many JSON values are
   recorded but not parsed, and the message hashes kept for conversations are
   capped.
+- Parsing and checks that take time linear in the size of each exchange,
+  including long streamed tool call arguments, trimmed histories, and large
+  echoed replies, with at most five anomalies of each kind listed per call.
 - Protocol upgrades are refused by default, since their traffic cannot be
   recorded.
 - `blackbox verify`: single streaming pass, parallel signature checks, plain
