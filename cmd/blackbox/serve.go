@@ -267,9 +267,10 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 	if !rec.CloseWithin(grace) {
 		// Still close the log, so entries already appended are flushed and
 		// covered by a final checkpoint rather than lost when the process
-		// exits. That too is bounded, in case the disk is what stalled.
+		// exits. That has its own bound, independent of how long calls may
+		// run, in case the disk is what stalled.
 		log.Printf("the recorder did not finish in time; closing the log without gateway_stop")
-		if err := closeWithin(l, grace); err != nil {
+		if err := closeWithin(l, logCloseTimeout); err != nil {
 			log.Printf("closing log: %v", err)
 		}
 		return 1
@@ -295,6 +296,9 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 	log.Printf("recorded %d calls (%d unrecorded, %d cancelled at shutdown)", stopRec.Calls, stopRec.Unrecorded, stopRec.AbortedAtShutdown)
 	return code
 }
+
+// logCloseTimeout bounds closing the log when shutdown has already run late.
+const logCloseTimeout = 10 * time.Second
 
 // closeWithin closes l, giving up after d.
 func closeWithin(l *ledger.Ledger, d time.Duration) error {
