@@ -700,7 +700,7 @@ func TestLongTrimSearchIsFast(t *testing.T) {
 	r.turn("s", turn1, respFinal)
 	start := time.Now()
 	r.turn("s", turn2, respFinal)
-	if d := time.Since(start); d > 3*time.Second {
+	if d := time.Since(start); d > 3*slowdown*time.Second {
 		t.Fatalf("the history check took %v", d)
 	}
 }
@@ -717,7 +717,7 @@ func TestLargeEchoIsFastAndFlagsAreCapped(t *testing.T) {
 	r.turn("s", request(tools, sys, user), resp)
 	start := time.Now()
 	c := r.turn("s", request(tools, sys, user, echo), respFinal)
-	if d := time.Since(start); d > 3*time.Second {
+	if d := time.Since(start); d > 3*slowdown*time.Second {
 		t.Fatalf("the echo check took %v", d)
 	}
 	if len(c.Anomalies) != maxPerKind+1 {

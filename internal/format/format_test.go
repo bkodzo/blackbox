@@ -611,7 +611,7 @@ func TestNestedWrappersAreBounded(t *testing.T) {
 	resp, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": text}}}})
 	start := time.Now()
 	p := Parse([]byte(`{"messages":[]}`), resp, false)
-	if d := time.Since(start); d > 2*time.Second {
+	if d := time.Since(start); d > 2*slowdown*time.Second {
 		t.Fatalf("scanning nested wrappers took %v", d)
 	}
 	if !p.Response.TextScanPartial {
@@ -654,7 +654,7 @@ func TestLongStreamedArgumentsAreLinear(t *testing.T) {
 		fmt.Fprintf(&b, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{%s\"arguments\":\"\\\"}\"}}]}}]}\n\n", name)
 		start := time.Now()
 		p := Parse([]byte(`{"messages":[]}`), []byte(b.String()), true)
-		if d := time.Since(start); d > 5*time.Second {
+		if d := time.Since(start); d > 5*slowdown*time.Second {
 			t.Fatalf("parsing a %d byte stream took %v", b.Len(), d)
 		}
 		want := `{"text":"` + strings.Repeat("x", 100_000*95) + `"}`
