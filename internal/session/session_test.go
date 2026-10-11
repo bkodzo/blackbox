@@ -704,3 +704,27 @@ func TestLongTrimSearchIsFast(t *testing.T) {
 		t.Fatalf("the history check took %v", d)
 	}
 }
+
+func TestLargeEchoIsFastAndFlagsAreCapped(t *testing.T) {
+	// A reply with many calls without IDs, of which the agent echoes only
+	// some. Each echoed call used to scan every call the model made, and
+	// every missing call got its own anomaly.
+	const made, echoed = 200_000, 24_000
+	block := `{"type":"tool_use","name":"a","input":{}}`
+	resp := `{"type":"message","content":[` + strings.Repeat(block+",", made-1) + block + `]}`
+	echo := `{"role":"assistant","content":[` + strings.Repeat(block+",", echoed-1) + block + `]}`
+	r := newRun(t)
+	r.turn("s", request(tools, sys, user), resp)
+	start := time.Now()
+	c := r.turn("s", request(tools, sys, user, echo), respFinal)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("the echo check took %v", d)
+	}
+	if len(c.Anomalies) != maxPerKind+1 {
+		t.Fatalf("got %d anomalies, want %d", len(c.Anomalies), maxPerKind+1)
+	}
+	want := fmt.Sprintf(moreFormat, made-echoed-maxPerKind)
+	if last := c.Anomalies[maxPerKind]; last.Kind != record.AnomalyHistoryRewritten || last.Detail != want {
+		t.Fatalf("summary %+v, want %q", last, want)
+	}
+}

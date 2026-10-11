@@ -69,7 +69,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `trace.trace_id`, `trace.span_id`, `trace.parent_span_id` | W3C trace context, continued from `traceparent` if sent |
 | `turn` | Position of the call in its session |
 | `tool_results_in[]` | New tool results in this request: `tool_call_id`, and `matched_seq`, the entry where the model requested it (0 if never) |
-| `anomalies[]` | `kind` and a plain-language `detail` |
+| `anomalies[]` | `kind` and a plain-language `detail`. At most five are listed per kind; a sixth of that kind counts the rest ("and N more like these") |
 
 ### Request
 

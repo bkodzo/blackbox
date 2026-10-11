@@ -398,10 +398,35 @@ func checkEcho(c *record.LLMCall, s *state, echo format.Message) map[string]uint
 		adopted[id] = s.lastSeq
 	}
 	used := make([]bool, len(s.calls))
-	usedText := make([]bool, len(s.textCalls))
+	// Indexes of the model's calls: by ID, and for calls without an ID and
+	// calls written as text, by name and arguments, in order, so each echoed
+	// call is matched without scanning them all.
+	byID := map[string]int{}
+	noID := map[toolCall][]int{}
+	for i, mc := range s.calls {
+		if mc.id == "" {
+			noID[mc] = append(noID[mc], i)
+		} else if _, dup := byID[mc.id]; !dup {
+			byID[mc.id] = i
+		}
+	}
+	text := map[toolCall][]int{}
+	for i, mc := range s.textCalls {
+		k := toolCall{name: mc.name, args: mc.args}
+		text[k] = append(text[k], i)
+	}
+	// take removes and returns the first index queued under k, or -1.
+	take := func(m map[toolCall][]int, k toolCall) int {
+		q := m[k]
+		if len(q) == 0 {
+			return -1
+		}
+		m[k] = q[1:]
+		return q[0]
+	}
 
 	for _, ec := range echo.ToolCalls {
-		if i := slices.IndexFunc(s.calls, func(mc toolCall) bool { return mc.id != "" && mc.id == ec.ID }); i >= 0 {
+		if i, ok := byID[ec.ID]; ok && ec.ID != "" {
 			used[i] = true
 			if mc := s.calls[i]; mc.name != ec.Name || mc.args != ec.Arguments {
 				flag(c, record.AnomalyHistoryRewritten,
@@ -410,9 +435,9 @@ func checkEcho(c *record.LLMCall, s *state, echo format.Message) map[string]uint
 			}
 			continue
 		}
-		same := func(mc toolCall) bool { return mc.name == ec.Name && mc.args == ec.Arguments }
+		key := toolCall{name: ec.Name, args: ec.Arguments}
 		// Calls the model returned without IDs match by name and arguments.
-		if i := indexUnused(s.calls, used, func(mc toolCall) bool { return mc.id == "" && same(mc) }); i >= 0 {
+		if i := take(noID, key); i >= 0 {
 			used[i] = true
 			adopt(ec.ID)
 			continue
@@ -421,8 +446,7 @@ func checkEcho(c *record.LLMCall, s *state, echo format.Message) map[string]uint
 		// parses replies, but only when the model made no real calls; it is
 		// always flagged, since the text may have been quoted, not meant.
 		if len(s.calls) == 0 {
-			if i := indexUnused(s.textCalls, usedText, same); i >= 0 {
-				usedText[i] = true
+			if take(text, key) >= 0 {
 				adopt(ec.ID)
 				flag(c, record.AnomalyTextCallExecuted,
 					"the agent ran %s %s, which the model wrote as text rather than calling it", ec.Name, clip(ec.Arguments))
@@ -452,15 +476,6 @@ func checkEcho(c *record.LLMCall, s *state, echo format.Message) map[string]uint
 		flag(c, record.AnomalyHistoryRewritten, "the text of the echoed reply differs from what the model returned")
 	}
 	return adopted
-}
-
-func indexUnused(calls []toolCall, used []bool, f func(toolCall) bool) int {
-	for i, mc := range calls {
-		if !used[i] && f(mc) {
-			return i
-		}
-	}
-	return -1
 }
 
 // match finds the branch a request without a session ID continues: one with
@@ -791,8 +806,30 @@ func sameModel(requested, served string) bool {
 	return ok && pinnedVersion.MatchString(rest)
 }
 
+// maxPerKind is how many anomalies of one kind a call lists; further ones are
+// counted in one more anomaly of that kind, so a reply with thousands of
+// problems still makes a record of reasonable size.
+const maxPerKind = 5
+
+const moreFormat = "and %d more like these"
+
 func flag(c *record.LLMCall, kind, f string, args ...any) {
-	c.Anomalies = append(c.Anomalies, record.Anomaly{Kind: kind, Detail: fmt.Sprintf(f, args...)})
+	n, last := 0, -1
+	for i, a := range c.Anomalies {
+		if a.Kind == kind {
+			n, last = n+1, i
+		}
+	}
+	switch {
+	case n < maxPerKind:
+		c.Anomalies = append(c.Anomalies, record.Anomaly{Kind: kind, Detail: fmt.Sprintf(f, args...)})
+	case n == maxPerKind:
+		c.Anomalies = append(c.Anomalies, record.Anomaly{Kind: kind, Detail: fmt.Sprintf(moreFormat, 1)})
+	default:
+		var more int
+		fmt.Sscanf(c.Anomalies[last].Detail, moreFormat, &more)
+		c.Anomalies[last].Detail = fmt.Sprintf(moreFormat, more+1)
+	}
 }
 
 func clip(s string) string {
