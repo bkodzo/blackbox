@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -657,7 +658,9 @@ func TestMessagesHeldAreBounded(t *testing.T) {
 	if r.tr.sessions["s4"] == nil {
 		t.Fatal("the most recent conversation was evicted")
 	}
-	for _, id := range []string{"s2", "s3", "s4"} {
+	// Calls can share a timestamp on coarse clocks, so which older
+	// conversations were evicted is not fixed; forget whichever remain.
+	for id := range maps.Clone(r.tr.sessions) {
 		r.tr.Forget(id)
 	}
 	if r.tr.held != 0 {
