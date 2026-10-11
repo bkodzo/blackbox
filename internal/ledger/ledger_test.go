@@ -696,3 +696,45 @@ func TestSecondWriterIsRefused(t *testing.T) {
 	}
 	b.Close()
 }
+
+func TestSharedCheckpointFileIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	_, key, _ := ed25519.GenerateKey(nil)
+	opt := Options{CheckpointPath: filepath.Join(dir, "cp.jsonl")}
+	a, err := Open(filepath.Join(dir, "a.jsonl"), key, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if b, err := Open(filepath.Join(dir, "b.jsonl"), key, opt); err == nil {
+		b.Close()
+		t.Fatal("a second log was given a checkpoint file already in use")
+	} else if !strings.Contains(err.Error(), "checkpoint file") {
+		t.Fatalf("unclear error: %v", err)
+	}
+	// The second log's own lock was released when Open failed.
+	b, err := Open(filepath.Join(dir, "b.jsonl"), key, Options{CheckpointPath: filepath.Join(dir, "b.cp.jsonl")})
+	if err != nil {
+		t.Fatalf("log left locked after a failed open: %v", err)
+	}
+	b.Close()
+}
+
+func TestLockFollowsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	_, key, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(dir, "log.jsonl")
+	a, err := Open(path, key, Options{CheckpointPath: filepath.Join(dir, "cp.jsonl")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	link := filepath.Join(dir, "link.jsonl")
+	if err := os.Symlink(path, link); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	if b, err := Open(link, key, Options{CheckpointPath: filepath.Join(dir, "cp2.jsonl")}); err == nil {
+		b.Close()
+		t.Fatal("the log was opened a second time through a symlink")
+	}
+}

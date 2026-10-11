@@ -102,12 +102,16 @@ with, its own latest checkpoint, so it never extends a chain over a gap. These
 checks run before any crash repair, so a log that is refused is left exactly as
 it was found. A checkpoint file is required.
 
-Only one process may write a log. The gateway holds an exclusive lock on a
-file next to the log (`blackbox.jsonl.lock`) until it exits, and a second
-gateway pointed at the same log refuses to start. Without it, a restart that
-overlapped the old process's shutdown would fork the chain, and the log would
-fail verification for good. The lock is released when the process exits, even
-after a crash, so a stale lock file never blocks a restart.
+Only one process may write a log or a checkpoint file. The gateway holds an
+exclusive lock on a file next to each (`blackbox.jsonl.lock` and
+`blackbox.checkpoints.jsonl.lock`) until it exits, and a second gateway
+pointed at either refuses to start. Without it, a restart that overlapped the
+old process's shutdown would fork the chain, two logs sharing a checkpoint
+file would mix their checkpoints, and either would fail verification for
+good. Symlinks are followed before the lock file is named, so every path to a
+file shares its lock; hard links are not detected. The lock is released when
+the process exits, even after a crash, so a stale lock file never blocks a
+restart.
 
 ### Durability and group commit
 

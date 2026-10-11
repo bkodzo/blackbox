@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- The checkpoint file is locked like the log, so two gateways can no longer
+  write one checkpoint file, and both locks follow symlinks.
+- When the recorder misses the shutdown deadline, the log is still closed, so
+  entries already written are flushed and covered by a final checkpoint.
+
 ## v0.1.0
 
 First release.

@@ -100,12 +100,13 @@ type Recovery struct {
 // is full. (On some systems a write blocks while an fsync of the same file is
 // in progress, so even the write must happen outside mu.)
 type Ledger struct {
-	opt  Options
-	key  ed25519.PrivateKey
-	kid  string
-	f    *os.File
-	lock *os.File // held until Close, so only one process writes the log
-	rec  Recovery
+	opt    Options
+	key    ed25519.PrivateKey
+	kid    string
+	f      *os.File
+	lock   *os.File // held until Close, so only one process writes the log
+	cpLock *os.File // the same for the checkpoint file
+	rec    Recovery
 
 	mu      sync.Mutex // guards the fields below
 	drained *sync.Cond // signalled when pend is swapped out or the ledger fails
@@ -152,7 +153,7 @@ var ErrClosed = errors.New("ledger: closed")
 // extended over the gap.
 func Open(path string, key ed25519.PrivateKey, opt Options) (*Ledger, error) {
 	opt.setDefaults()
-	lk, err := lock(path)
+	lk, err := lock(path, "log")
 	if err != nil {
 		return nil, err
 	}
@@ -335,9 +336,12 @@ func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
 	if l.opt.CheckpointPath == "" {
 		return nil
 	}
+	var err error
+	if l.cpLock, err = lock(l.opt.CheckpointPath, "checkpoint file"); err != nil {
+		return err
+	}
 	_, statErr := os.Stat(l.opt.CheckpointPath)
 	l.rec.CheckpointsMissing = errors.Is(statErr, os.ErrNotExist) && l.seq > 0
-	var err error
 	if l.cp, err = os.OpenFile(l.opt.CheckpointPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600); err != nil {
 		return err
 	}
@@ -675,7 +679,8 @@ func (l *Ledger) closeFiles() error {
 	if l.cp != nil {
 		err = errors.Join(err, l.cp.Close())
 	}
-	closeLock(l.lock) // last, once nothing more will be written
+	closeLock(l.cpLock) // last, once nothing more will be written
+	closeLock(l.lock)
 	return err
 }
 
