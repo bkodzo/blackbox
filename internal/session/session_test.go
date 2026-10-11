@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -661,5 +662,45 @@ func TestMessagesHeldAreBounded(t *testing.T) {
 	}
 	if r.tr.held != 0 {
 		t.Fatalf("held %d message hashes with nothing tracked", r.tr.held)
+	}
+}
+
+func TestOverlapsMatchesBruteForce(t *testing.T) {
+	brute := func(t, x []string) []int {
+		var out []int
+		for b := min(len(t), len(x)); b >= 0; b-- {
+			if slices.Equal(x[:b], t[len(t)-b:]) {
+				out = append(out, b)
+			}
+		}
+		return out
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	gen := func() []string {
+		s := make([]string, rng.IntN(9))
+		for i := range s {
+			s[i] = string(rune('a' + rng.IntN(2)))
+		}
+		return s
+	}
+	for range 100_000 {
+		tt, x := gen(), gen()
+		if got, want := overlaps(tt, x), brute(tt, x); !slices.Equal(got, want) {
+			t.Fatalf("overlaps(%v, %v) = %v, want %v", tt, x, got, want)
+		}
+	}
+}
+
+func TestLongTrimSearchIsFast(t *testing.T) {
+	// Every candidate trim used to be compared in full.
+	const n = 90_000
+	turn1 := `{"messages":[{"role":"user","content":"a"},{"a":1}` + strings.Repeat(`,{}`, n) + `]}`
+	turn2 := `{"messages":[{"role":"user","content":"a"}` + strings.Repeat(`,{}`, n) + `,{"role":"user","content":"w"}]}`
+	r := newRun(t)
+	r.turn("s", turn1, respFinal)
+	start := time.Now()
+	r.turn("s", turn2, respFinal)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("the history check took %v", d)
 	}
 }

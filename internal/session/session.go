@@ -250,9 +250,9 @@ func historyCheck(c *record.LLMCall, s *state, cur []string, msgs []format.Messa
 	// history. What follows must be new messages starting with the model's
 	// reply, which checkAdded then checks like any other turn, so a trim
 	// cannot be used to slip in messages the model never sent.
-	for b := min(len(cur)-a, len(prev)-a-1); b >= 0 && a > 0; b-- {
-		if !slices.Equal(cur[a:a+b], prev[len(prev)-b:]) {
-			continue
+	for _, b := range overlaps(prev[a+1:], cur[a:]) {
+		if a == 0 {
+			break
 		}
 		if i := a + b; i == len(cur) || msgs[i].Role == "assistant" {
 			flag(c, record.AnomalyHistoryTruncated,
@@ -267,6 +267,38 @@ func historyCheck(c *record.LLMCall, s *state, cur []string, msgs []format.Messa
 	flag(c, record.AnomalyHistoryRewritten,
 		"message %d (%s) is not what was sent in turn %d", a+1, role, s.turn)
 	return -1
+}
+
+// overlaps returns every length b, longest first and ending with 0, for which
+// the last b elements of t equal the first b elements of x. It runs in time
+// linear in len(t) + len(x) (Knuth-Morris-Pratt), so the history check stays
+// fast however long the conversation is.
+func overlaps(t, x []string) []int {
+	pi := make([]int, len(x)) // pi[i]: longest proper prefix of x[:i+1] that is also its suffix
+	for i := 1; i < len(x); i++ {
+		k := pi[i-1]
+		for k > 0 && x[i] != x[k] {
+			k = pi[k-1]
+		}
+		if x[i] == x[k] {
+			k++
+		}
+		pi[i] = k
+	}
+	q := 0 // longest prefix of x that is a suffix of the part of t read so far
+	for _, v := range t {
+		for q > 0 && (q == len(x) || v != x[q]) {
+			q = pi[q-1]
+		}
+		if q < len(x) && v == x[q] {
+			q++
+		}
+	}
+	out := []int{}
+	for ; q > 0; q = pi[q-1] {
+		out = append(out, q)
+	}
+	return append(out, 0)
 }
 
 // checkAdded checks the messages added since the last turn. A turn adds at
