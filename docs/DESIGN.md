@@ -202,8 +202,10 @@ it belongs to starts fresh. Conversations remember at most 1,000,000 message
 hashes in total (about 80 MB), evicting the least recently used.
 
 Shutdown waits a bounded time for calls in flight and for the recorder, so a
-disk that stops responding cannot keep the process from exiting; the gateway
-then exits with an error and without writing `gateway_stop`.
+disk that stops responding cannot keep the process from exiting. If the
+recorder does not finish in time, the gateway still closes the log, so every
+entry already written is flushed and covered by a final checkpoint, and exits
+with an error and without writing `gateway_stop`.
 
 ## Format parsing
 

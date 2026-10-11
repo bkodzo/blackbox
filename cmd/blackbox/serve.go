@@ -265,7 +265,13 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 		code = 1
 	}
 	if !rec.CloseWithin(grace) {
-		log.Printf("the audit log did not finish writing; exiting without gateway_stop")
+		// Still close the log, so entries already appended are flushed and
+		// covered by a final checkpoint rather than lost when the process
+		// exits. That too is bounded, in case the disk is what stalled.
+		log.Printf("the recorder did not finish in time; closing the log without gateway_stop")
+		if err := closeWithin(l, grace); err != nil {
+			log.Printf("closing log: %v", err)
+		}
 		return 1
 	}
 
@@ -288,6 +294,18 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 	}
 	log.Printf("recorded %d calls (%d unrecorded, %d cancelled at shutdown)", stopRec.Calls, stopRec.Unrecorded, stopRec.AbortedAtShutdown)
 	return code
+}
+
+// closeWithin closes l, giving up after d.
+func closeWithin(l *ledger.Ledger, d time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- l.Close() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		return errors.New("timed out; entries not yet written may be missing")
+	}
 }
 
 // previousShutdown reports whether the last run ended with a gateway_stop.

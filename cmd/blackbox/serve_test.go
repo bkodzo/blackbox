@@ -204,3 +204,45 @@ func post(t *testing.T, url, body string) {
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 }
+
+func TestSlowRecorderAtShutdownStillClosesTheLog(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer up.Close()
+	// A grace period far shorter than the time needed to record a backlog
+	// of large calls.
+	g := startGateway(t, up.URL, func(c *config) { c.ShutdownTimeout = duration(time.Millisecond) })
+	waitHealthy(t, g.url)
+	body := `{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", 4<<20) + `"}]}`
+	for range 30 {
+		post(t, g.url+"/v1/chat/completions", body)
+	}
+	if code := g.shutdown(t); code == 0 {
+		t.Skip("the recorder kept up, so this run did not exercise a slow shutdown")
+	}
+
+	// Whatever was written must be flushed and covered by a final
+	// checkpoint by the time serve returns, as the process exits then.
+	data, err := os.ReadFile(g.cfg.Log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := uint64(strings.Count(string(data), "\n"))
+	cps, _, err := ledger.ReadCheckpoints(g.cfg.Checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var covered uint64
+	for _, c := range cps {
+		covered = max(covered, c.Seq)
+	}
+	if entries == 0 || covered != entries {
+		t.Fatalf("serve returned with %d entries in the log, %d covered by a checkpoint", entries, covered)
+	}
+	recs := g.records(t)
+	if last := typeOf(recs[len(recs)-1]); last == record.TypeGatewayStop {
+		t.Fatal("gateway_stop was written although the recorder did not finish")
+	}
+}
