@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/bkodzo/blackbox/internal/proxy"
 	"github.com/bkodzo/blackbox/internal/record"
 	"github.com/bkodzo/blackbox/internal/risk"
+	"github.com/bkodzo/blackbox/internal/session"
 )
 
 func TestEndToEnd(t *testing.T) {
@@ -306,5 +308,45 @@ func TestTooComplexTurnsResetTheirSession(t *testing.T) {
 	}
 	if n := tracker.Sessions(); n != 0 {
 		t.Fatalf("rebuild: the session with an unchecked turn is still tracked (%d)", n)
+	}
+}
+
+func TestRebuildKeepsTheSameTextCalls(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log.jsonl")
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	l, _ := ledger.Open(logPath, priv, ledger.Options{})
+	rec := New(l, "gw", Options{})
+	exchange := func(req, resp string) record.Exchange {
+		x := record.Exchange{Call: &record.LLMCall{Type: record.TypeLLMCall}, Req: []byte(req), Resp: []byte(resp)}
+		x.Call.Session.ID = "s"
+		x.Call.Timing.CompletedAt = time.Now()
+		x.Call.Request.Body.Text, x.Call.Response.Body.Text = req, resp
+		return x
+	}
+	tools := `"tools":[{"function":{"name":"list_dir"}}]`
+	u := `{"role":"user","content":"hi"}`
+	// The model quotes a call to a tool that was not offered, which the
+	// recorder ignores.
+	rec.Submit(exchange(`{`+tools+`,"messages":[`+u+`]}`,
+		`{"choices":[{"message":{"content":"{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}"}}]}`))
+	rec.Close()
+	l.Close()
+
+	rebuilt, _, err := Rebuild(logPath, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := `{` + tools + `,"messages":[` + u + `,{"role":"assistant","tool_calls":[{"id":"t1","function":{"name":"shell","arguments":"{\"cmd\":\"ls\"}"}}]},{"role":"tool","tool_call_id":"t1","content":"x"}]}`
+	var got [2][]string
+	for i, tr := range []*session.Tracker{rec.sessions, rebuilt} {
+		call, p := Enrich(exchange(next, `{"choices":[{"message":{"content":"ok"}}]}`), "gw", nil)
+		tr.Observe(call, p)
+		for _, a := range call.Anomalies {
+			got[i] = append(got[i], a.Kind)
+		}
+	}
+	if !slices.Equal(got[0], got[1]) {
+		t.Fatalf("live %v, after rebuild %v", got[0], got[1])
 	}
 }

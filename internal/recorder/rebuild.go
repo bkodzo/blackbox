@@ -67,6 +67,23 @@ func Rebuild(path string, idle time.Duration) (*session.Tracker, int, error) {
 			t.Forget(c.Session.ID) // as the recorder did
 			return nil
 		}
+		// Keep the calls written as text that the recorder kept, as it
+		// recorded them, so the replay matches what happened live even if
+		// the risk map has changed since.
+		kept := map[[2]string]int{}
+		for _, tc := range c.Response.ToolCalls {
+			if tc.InText {
+				kept[[2]string{tc.Name, tc.Arguments}]++
+			}
+		}
+		textCalls := p.Response.TextToolCalls[:0:0]
+		for _, tc := range p.Response.TextToolCalls {
+			if k := [2]string{tc.Name, tc.Arguments}; kept[k] > 0 {
+				kept[k]--
+				textCalls = append(textCalls, tc)
+			}
+		}
+		p.Response.TextToolCalls = textCalls
 		// Carry the error over, so failed calls are replayed as failed.
 		scratch := record.LLMCall{Session: record.Session{ID: c.Session.ID}, Error: c.Error}
 		t.CommitAt(t.Observe(&scratch, p), e.Seq, c.Timing.CompletedAt)
