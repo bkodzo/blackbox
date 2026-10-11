@@ -640,3 +640,50 @@ func TestManyValuesAreNotParsed(t *testing.T) {
 		t.Fatalf("text with JSON punctuation was counted: %+v", r.TooComplex)
 	}
 }
+
+func TestLongStreamedArgumentsAreLinear(t *testing.T) {
+	// Many small pieces of one call's arguments, with and without the name
+	// repeated in every piece. Each used to copy and re-check everything
+	// received so far.
+	for _, name := range []string{"", `"name":"write_file",`} {
+		var b strings.Builder
+		fmt.Fprintf(&b, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"text\\\":\\\"\"}}]}}]}\n\n")
+		for range 100_000 {
+			fmt.Fprintf(&b, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{%s\"arguments\":\"%s\"}}]}}]}\n\n", name, strings.Repeat("x", 95))
+		}
+		fmt.Fprintf(&b, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{%s\"arguments\":\"\\\"}\"}}]}}]}\n\n", name)
+		start := time.Now()
+		p := Parse([]byte(`{"messages":[]}`), []byte(b.String()), true)
+		if d := time.Since(start); d > 5*time.Second {
+			t.Fatalf("parsing a %d byte stream took %v", b.Len(), d)
+		}
+		want := `{"text":"` + strings.Repeat("x", 100_000*95) + `"}`
+		if len(p.Response.ToolCalls) != 1 || p.Response.ToolCalls[0].Arguments != want {
+			t.Fatalf("got %d calls, or the arguments were not joined in order", len(p.Response.ToolCalls))
+		}
+	}
+}
+
+func TestStreamedArgumentsCompleteness(t *testing.T) {
+	for _, c := range []struct {
+		pieces []string
+		want   bool
+	}{
+		{[]string{`{"a":`, `"}{]"`, `}`}, true},
+		{[]string{`{"a":"\"}"`, `}`}, true},
+		{[]string{`[1,`, `2]`, " \n"}, true},
+		{[]string{`{"a":1}`, `x`}, false},
+		{[]string{`{"a":}`}, false},
+		{[]string{`{"a":1`}, false},
+		{[]string{`"text"`}, false},
+		{[]string{``}, false},
+	} {
+		var a streamedArgs
+		for _, p := range c.pieces {
+			a.write(p)
+		}
+		if got := a.complete(); got != c.want {
+			t.Errorf("%q: complete %v, want %v", c.pieces, got, c.want)
+		}
+	}
+}

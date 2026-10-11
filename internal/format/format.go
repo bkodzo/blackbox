@@ -480,6 +480,7 @@ func parseStream(b []byte, r *Response) string {
 	// ID starts a new call.
 	slot := map[int]int{}
 	nextSlot := 0
+	chatArgs := map[int]*streamedArgs{}
 	call := func(i int) *ToolCall {
 		c, ok := calls[i]
 		if !ok {
@@ -523,10 +524,11 @@ func parseStream(b []byte, r *Response) string {
 				reasoning.WriteString(c.Delta.text())
 				for _, d := range c.Delta.ToolCalls {
 					key, ok := slot[d.Index]
-					if !ok || startsNewCall(calls[key], d) {
+					if !ok || startsNewCall(calls[key], chatArgs[key], d) {
 						key = nextSlot
 						nextSlot++
 						slot[d.Index] = key
+						chatArgs[key] = &streamedArgs{}
 					}
 					tc := call(key)
 					if tc.ID == "" {
@@ -535,7 +537,7 @@ func parseStream(b []byte, r *Response) string {
 					if tc.Name == "" {
 						tc.Name = d.Function.Name
 					}
-					tc.Arguments += d.Function.Arguments
+					chatArgs[key].write(d.Function.Arguments)
 				}
 			}
 			continue
@@ -579,6 +581,9 @@ func parseStream(b []byte, r *Response) string {
 		if buf, ok := args[i]; ok {
 			tc.Arguments = string(compact(buf.Bytes()))
 		}
+		if a, ok := chatArgs[i]; ok {
+			tc.Arguments = a.buf.String()
+		}
 		r.ToolCalls = append(r.ToolCalls, *tc)
 	}
 	return format
@@ -591,22 +596,90 @@ func parseStream(b []byte, r *Response) string {
 var annotationKeys = []string{"cache_control"}
 
 // startsNewCall reports whether a streamed tool call delta begins a new call
-// rather than continuing cur. Servers differ: some reuse index 0 for every
-// call, some repeat the ID or name in every chunk, some send a fresh ID per
-// chunk. A new call carries its name, and starts after the previous call's
-// arguments are complete.
-func startsNewCall(cur *ToolCall, d chatToolCall) bool {
+// rather than continuing cur, whose arguments so far are args. Servers
+// differ: some reuse index 0 for every call, some repeat the ID or name in
+// every chunk, some send a fresh ID per chunk. A new call carries its name,
+// and starts after the previous call's arguments are complete.
+func startsNewCall(cur *ToolCall, args *streamedArgs, d chatToolCall) bool {
 	name := d.Function.Name
 	switch {
 	case name == "":
 		return false
 	case d.ID != "" && cur.ID != "" && d.ID != cur.ID && cur.Name != "":
 		return true
-	case cur.Name != "" && json.Valid([]byte(cur.Arguments)):
+	case cur.Name != "" && args.complete():
 		return name != cur.Name || strings.HasPrefix(strings.TrimSpace(d.Function.Arguments), "{")
 	}
 	return false
 }
+
+// streamedArgs collects a streamed call's arguments and tracks, as each
+// piece arrives, whether they form one complete JSON object or array. Each
+// byte is looked at once, so a stream of many small pieces costs no more
+// than one large one.
+type streamedArgs struct {
+	buf     bytes.Buffer
+	depth   int
+	started bool // the first non-space byte opened an object or array
+	other   bool // the first non-space byte was something else
+	closed  bool // the opening bracket has been closed
+	extra   bool // something other than space followed the close
+	inStr   bool
+	escaped bool
+	valid   int8 // json.Valid of the closed value: 0 unknown, 1 valid, -1 not
+}
+
+func (a *streamedArgs) write(s string) {
+	a.buf.WriteString(s)
+	for i := range len(s) {
+		c := s[i]
+		switch {
+		case a.extra || a.other:
+			return
+		case a.closed:
+			if !isSpace(c) {
+				a.extra = true
+			}
+		case a.escaped:
+			a.escaped = false
+		case a.inStr:
+			if c == '\\' {
+				a.escaped = true
+			} else if c == '"' {
+				a.inStr = false
+			}
+		case c == '"':
+			a.inStr = true
+		case c == '{' || c == '[':
+			a.started = true
+			a.depth++
+		case c == '}' || c == ']':
+			if a.depth--; a.depth == 0 && a.started {
+				a.closed = true
+			}
+		case !a.started && !isSpace(c):
+			a.other = true
+		}
+	}
+}
+
+// complete reports whether the arguments so far are one valid JSON object or
+// array. json.Valid runs at most once, when the value first closes; space
+// after it does not change the answer and anything else makes it invalid.
+func (a *streamedArgs) complete() bool {
+	if a == nil || !a.closed || a.extra {
+		return false
+	}
+	if a.valid == 0 {
+		a.valid = -1
+		if json.Valid(a.buf.Bytes()) {
+			a.valid = 1
+		}
+	}
+	return a.valid == 1
+}
+
+func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
 
 // canonical re-encodes JSON with sorted keys, no insignificant space, and
 // numbers in one form, so equal content hashes equally regardless of how a
