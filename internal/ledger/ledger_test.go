@@ -648,6 +648,36 @@ func TestMissingCheckpointFileIsRecorded(t *testing.T) {
 	if !l.Recovery().CheckpointsMissing {
 		t.Fatal("a deleted checkpoint file was not reported")
 	}
+	if l.Recovery().CheckpointsEmpty {
+		t.Fatal("a missing checkpoint file was also reported as empty")
+	}
+}
+
+func TestEmptiedCheckpointFileIsRecorded(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, 2)
+	os.Truncate(f.cps, 0)
+	l := f.open(t, Options{})
+	rec := l.Recovery()
+	l.Close()
+	if !rec.CheckpointsEmpty || rec.CheckpointsMissing {
+		t.Fatalf("an emptied checkpoint file was reported as %+v", rec)
+	}
+	// After a normal restart the file has checkpoints again, so nothing is
+	// reported, and a new log with no entries is not reported either.
+	l = f.open(t, Options{})
+	rec = l.Recovery()
+	l.Close()
+	if rec.CheckpointsEmpty {
+		t.Fatal("a checkpoint file with checkpoints was reported as empty")
+	}
+	g := newFixture(t)
+	l = g.open(t, Options{})
+	rec = l.Recovery()
+	l.Close()
+	if rec.CheckpointsEmpty || rec.CheckpointsMissing {
+		t.Fatalf("a new log was reported as %+v", rec)
+	}
 }
 
 func TestFailedRepairLeavesCheckpointsUntouched(t *testing.T) {

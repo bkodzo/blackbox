@@ -138,6 +138,7 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 
 		CheckpointTornBytes: recovery.CheckpointTornBytes,
 		CheckpointsMissing:  recovery.CheckpointsMissing,
+		CheckpointsEmpty:    recovery.CheckpointsEmpty,
 	}
 	// gateway_start, with any recovery it describes, is on disk before the
 	// first request is served.
@@ -157,6 +158,10 @@ func serve(ctx context.Context, cfg config, ln net.Listener, stdout io.Writer) i
 	}
 	if start.CheckpointsMissing {
 		log.Printf("warning: the checkpoint file %s was missing and has been created empty", cfg.Checkpoints)
+	}
+	if start.CheckpointsEmpty {
+		log.Printf("warning: the checkpoint file %s has no checkpoints although the log has entries; "+
+			"it was emptied, or the last run stopped before writing its first one", cfg.Checkpoints)
 	}
 	if start.RepairedSeq > 0 {
 		log.Printf("warning: entry %d was missing its final newline; added it", start.RepairedSeq)

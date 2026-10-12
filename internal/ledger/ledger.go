@@ -90,6 +90,10 @@ type Recovery struct {
 	// CheckpointsMissing is set when the log had entries but the checkpoint
 	// file did not exist and was created empty.
 	CheckpointsMissing bool
+	// CheckpointsEmpty is set when the log had entries but the checkpoint
+	// file held no checkpoints: it was emptied, or the last run stopped
+	// before writing its first one.
+	CheckpointsEmpty bool
 }
 
 // Ledger appends entries to a log file. It is safe for concurrent use.
@@ -350,6 +354,7 @@ func (l *Ledger) openCheckpoints(pub ed25519.PublicKey) error {
 		return fmt.Errorf("ledger: %s: %w", l.opt.CheckpointPath, err)
 	}
 	l.cpTorn, l.cpUnterminated = torn, unterminated
+	l.rec.CheckpointsEmpty = !l.rec.CheckpointsMissing && len(cps) == 0 && l.seq > 0
 	for _, c := range cps {
 		if err := c.verify(pub, l.kid); err != nil {
 			return fmt.Errorf("ledger: %v; run `blackbox verify`", err)

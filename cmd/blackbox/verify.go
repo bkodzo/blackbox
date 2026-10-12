@@ -102,6 +102,11 @@ func runVerify(args []string) int {
 				warnings = append(warnings, fmt.Sprintf(
 					"seq %d: at startup the checkpoint file was missing and was created empty", e.Seq))
 			}
+			if s.CheckpointsEmpty {
+				warnings = append(warnings, fmt.Sprintf(
+					"seq %d: at startup the checkpoint file had no checkpoints although the log had entries "+
+						"(it was emptied, or the run before stopped before writing its first one)", e.Seq))
+			}
 			if s.RepairedSeq > 0 {
 				warnings = append(warnings, fmt.Sprintf(
 					"seq %d: at startup entry %d was missing its final newline; the gateway added it", e.Seq, s.RepairedSeq))

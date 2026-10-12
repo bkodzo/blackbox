@@ -36,6 +36,7 @@ Every record has a `type` field: `gateway_start`, `gateway_stop`, or `llm_call`.
 | `quarantine_sha256` | Hash of those bytes |
 | `checkpoint_torn_bytes` | Bytes of an incomplete final checkpoint line removed at startup |
 | `checkpoints_missing` | The log had entries but its checkpoint file was missing and was created empty |
+| `checkpoints_empty` | The log had entries but its checkpoint file held no checkpoints: it was emptied, or the run before stopped before writing its first one |
 
 ## gateway_stop
 

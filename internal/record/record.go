@@ -34,6 +34,9 @@ type GatewayStart struct {
 	// CheckpointsMissing is set when the log had entries but its checkpoint
 	// file did not exist and was created empty.
 	CheckpointsMissing bool `json:"checkpoints_missing,omitempty"`
+	// CheckpointsEmpty is set when the log had entries but its checkpoint
+	// file held no checkpoints.
+	CheckpointsEmpty bool `json:"checkpoints_empty,omitempty"`
 }
 
 // GatewayStop is written on clean shutdown.
