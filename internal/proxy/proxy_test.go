@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"testing"
@@ -545,5 +546,51 @@ func TestRequestsAfterCloseAreRefused(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
+func TestLateErrorOnAReusedConnectionReachesTheClient(t *testing.T) {
+	// The first response sets a write deadline on the connection. A second
+	// request on the same connection whose upstream fails only after that
+	// deadline has passed must still get its 502. net/http clears write
+	// deadlines between requests; this guards that the proxy relies on it
+	// correctly.
+	const idle = 100 * time.Millisecond
+	n := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n++; n == 1 {
+			io.WriteString(w, `{"choices":[]}`)
+			return
+		}
+		time.Sleep(3 * idle)
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Close() // fail without a response
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	caps := make(chan record.Exchange, 2)
+	srv := httptest.NewServer(New(Config{Upstream: u, StreamIdle: idle, Sink: func(c record.Exchange) { caps <- c }}))
+	defer srv.Close()
+
+	client := &http.Client{Transport: &http.Transport{MaxConnsPerHost: 1}}
+	defer client.CloseIdleConnections()
+	var conns []string
+	for i := range 2 {
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{}`))
+		trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+			conns = append(conns, info.Conn.LocalAddr().String())
+		}}
+		resp, err := client.Do(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
+		if err != nil {
+			t.Fatalf("request %d: %v", i+1, err)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if want := []int{200, 502}[i]; resp.StatusCode != want {
+			t.Fatalf("request %d: status %d, want %d", i+1, resp.StatusCode, want)
+		}
+	}
+	if len(conns) != 2 || conns[0] != conns[1] {
+		t.Fatalf("the requests did not share a connection: %v", conns)
 	}
 }
