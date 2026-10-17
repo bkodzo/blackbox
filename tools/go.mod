@@ -4,7 +4,7 @@ module github.com/bkodzo/blackbox/tools
 
 go 1.27.2
 
-require honnef.co/go/tools v0.8.1
+require honnef.co/go/tools v0.8.2
 
 require (
 	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
