@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.1
 
 - The checkpoint file is locked like the log, so two gateways can no longer
   write one checkpoint file, and both locks follow symlinks.
