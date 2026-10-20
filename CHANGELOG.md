@@ -6,6 +6,10 @@
   write one checkpoint file, and both locks follow symlinks.
 - When the recorder misses the shutdown deadline, the log is still closed, so
   entries already written are flushed and covered by a final checkpoint.
+- `blackbox verify` reports a log that ends in a clean shutdown no checkpoint
+  covers as a warning instead of tampering. A crash while the final
+  checkpoint was written, or a checkpoint copy collected from stdout that is
+  behind, caused intact logs to be reported as tampered.
 - A checkpoint file that holds no checkpoints although the log has entries is
   reported at startup and by `blackbox verify` (`checkpoints_empty`), as a
   missing one already was.

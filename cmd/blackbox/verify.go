@@ -134,18 +134,22 @@ func runVerify(args []string) int {
 	if err != nil {
 		return failCode(exitError, "%v", err)
 	}
-	// A clean shutdown always writes a final checkpoint. A log that ends in
-	// one with no checkpoint covering it has lost entries, and its checkpoint
-	// file has been edited to match.
-	if lastType == record.TypeGatewayStop && !*noCPs {
+	// A clean shutdown writes a final checkpoint after gateway_stop, so a log
+	// that ends in one with no checkpoint covering it is worth a look. It is
+	// not proof of tampering: a crash between the two writes, or a checkpoint
+	// copy that is behind (such as one collected from stdout), looks the same.
+	// An attacker who cut the log back to an earlier run's end would keep
+	// that run's checkpoint, and only a copy kept elsewhere reveals that.
+	if lastType == record.TypeGatewayStop && !*noCPs && len(cps) > 0 {
 		var covered uint64
 		for _, c := range cps {
 			covered = max(covered, c.Seq)
 		}
 		if covered < res.Entries {
-			fmt.Printf("\nResult: TAMPERED\n  the log ends with a clean shutdown (entry %d) that no checkpoint covers;\n"+
-				"  entries were removed or the checkpoint file was edited\n", res.Entries)
-			return exitTampered
+			warnings = append(warnings, fmt.Sprintf(
+				"the log ends with a clean shutdown (entry %d), but the newest checkpoint here covers entry %d; "+
+					"the gateway stopped while writing its final checkpoint, this copy of the checkpoints is behind, "+
+					"or checkpoints were removed. Compare with the copy kept elsewhere", res.Entries, covered))
 		}
 	}
 

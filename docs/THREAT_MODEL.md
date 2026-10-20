@@ -82,7 +82,12 @@ checks is itself visible.
   public key proves nothing. Distribute the public key separately from the log.
 - **Checkpoints leave the gateway host.** If the attacker controls every copy of
   the checkpoints, they can truncate the log and the checkpoint file together.
-  Ship checkpoints from stdout to a log collector or another machine.
+  Ship checkpoints from stdout to a log collector or another machine. A log
+  cut back to the end of an earlier run, with the checkpoint file cut to
+  match, verifies as intact against the local file; only a copy kept
+  elsewhere shows the newer checkpoints. `blackbox verify` warns when a log
+  ends in a clean shutdown that the given checkpoints do not cover, since a
+  crash during the final checkpoint or a copy that is behind looks the same.
 - **Entries newer than the last checkpoint are not yet protected against
   removal.** Someone who controls the gateway host can kill it and cut entries
   written since the last checkpoint; on restart this looks like a crash (an

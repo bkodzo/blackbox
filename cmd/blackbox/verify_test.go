@@ -146,7 +146,7 @@ func TestShowPrintsReasoning(t *testing.T) {
 	}
 }
 
-func TestUncoveredCleanShutdownIsTampering(t *testing.T) {
+func TestUncoveredCleanShutdownIsAWarning(t *testing.T) {
 	logPath, cpPath, pubPath := logFixture(t)
 	// A second run, so there are two checkpoints.
 	key, _ := ledger.LoadPrivateKey(filepath.Join(filepath.Dir(pubPath), "key.ed25519"))
@@ -170,10 +170,12 @@ func TestUncoveredCleanShutdownIsTampering(t *testing.T) {
 		t.Fatalf("checkpoint without its newline: exit %d", code)
 	}
 
-	// Deleting the newest checkpoint leaves a clean shutdown no checkpoint covers.
+	// Without the newest checkpoint, as after a crash between gateway_stop
+	// and the final checkpoint, or with a copy of the checkpoints that is
+	// behind, the log is intact but worth comparing with another copy.
 	lines := strings.SplitAfter(string(b), "\n")
 	os.WriteFile(cpPath, []byte(lines[0]), 0o600)
-	if code := runVerify(args); code != exitTampered {
-		t.Fatalf("newest checkpoint deleted: exit %d", code)
+	if code := runVerify(args); code != exitWarnings {
+		t.Fatalf("newest checkpoint missing: exit %d", code)
 	}
 }
