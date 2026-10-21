@@ -82,7 +82,7 @@ type Index struct {
 	path string
 
 	mu       sync.RWMutex
-	entries  []Entry // in log order
+	stored   []entry // in log order
 	sessions map[string]*Session
 	off      int64 // bytes of complete lines read so far
 	err      error // set when an entry could not be read; indexing stops there
@@ -95,6 +95,83 @@ type Index struct {
 	lost     []byte
 	lostSeq  uint64
 	replaced bool // the file was replaced or rewritten with other content
+
+	// table holds the strings entries refer to, each repeated value once;
+	// refs finds a value's place in it.
+	table []string
+	refs  map[string]uint32
+}
+
+// entry is how an Entry is stored: strings as places in Index.table and the
+// time as Unix nanoseconds, which takes about half the memory.
+type entry struct {
+	seq, off                                                 int64
+	time                                                     int64 // 0 for no time
+	n, status, turn, in, out                                 int32
+	typ, instance, session, agent, principal, model, errType uint32
+	tools                                                    []Tool
+	anomalies                                                []record.Anomaly
+}
+
+// maxRefs bounds Index.refs. Most fields repeat across entries (agents,
+// models, session keys), but a log can hold values that never do; past this
+// many distinct values, new ones are stored without looking for repeats.
+const maxRefs = 1 << 16
+
+// ref returns the place of s in the index's table, adding it if needed.
+func (x *Index) ref(s string) uint32 {
+	if r, ok := x.refs[s]; ok {
+		return r
+	}
+	r := uint32(len(x.table))
+	x.table = append(x.table, s)
+	if len(x.refs) < maxRefs {
+		x.refs[s] = r
+	}
+	return r
+}
+
+// str returns the string stored at place r.
+func (x *Index) str(r uint32) string { return x.table[r] }
+
+// intern returns the index's copy of s, so a repeated value is stored once.
+func (x *Index) intern(s string) string { return x.str(x.ref(s)) }
+
+func (x *Index) newTable() {
+	x.table, x.refs = []string{""}, map[string]uint32{"": 0}
+}
+
+func (x *Index) pack(e Entry) entry {
+	var t int64
+	if !e.Time.IsZero() {
+		t = e.Time.UnixNano()
+	}
+	return entry{
+		seq: int64(e.Seq), off: e.Off, time: t,
+		n: int32(e.Len), status: int32(e.Status), turn: int32(e.Turn), in: int32(e.In), out: int32(e.Out),
+		typ: x.ref(e.Type), instance: x.ref(e.Instance), session: x.ref(e.Session), agent: x.ref(e.Agent),
+		principal: x.ref(e.Principal), model: x.ref(e.Model), errType: x.ref(e.ErrorClass),
+		tools: e.Tools, anomalies: e.Anomalies,
+	}
+}
+
+func (e *entry) when() time.Time {
+	if e.time == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, e.time)
+}
+
+// at returns the stored entry i as an Entry.
+func (x *Index) at(i int) Entry {
+	e := &x.stored[i]
+	return Entry{
+		Seq: uint64(e.seq), Off: e.off, Len: int(e.n), Type: x.str(e.typ), Time: e.when(),
+		Instance: x.str(e.instance), Session: x.str(e.session), Agent: x.str(e.agent),
+		Principal: x.str(e.principal), Model: x.str(e.model), Status: int(e.status),
+		ErrorClass: x.str(e.errType), Turn: int(e.turn), In: int(e.in), Out: int(e.out),
+		Tools: e.tools, Anomalies: e.anomalies,
+	}
 }
 
 // headLen is how much of a line is kept to recognize it: enough to include
@@ -106,6 +183,7 @@ func lineHead(line []byte) []byte { return bytes.Clone(line[:min(len(line), head
 // Open reads the log at path into a new index.
 func Open(path string) (*Index, error) {
 	x := &Index{path: path, sessions: map[string]*Session{}}
+	x.newTable()
 	if err := x.Refresh(); err != nil {
 		return nil, err
 	}
@@ -132,8 +210,8 @@ func (x *Index) Refresh() error {
 	}
 	switch {
 	case fi.Size() < x.off:
-		if n := len(x.entries); n > 0 && x.lost == nil {
-			x.lost, x.lostSeq = x.lastHead, x.entries[n-1].Seq
+		if n := len(x.stored); n > 0 && x.lost == nil {
+			x.lost, x.lostSeq = x.lastHead, uint64(x.stored[n-1].seq)
 		}
 		x.reset()
 	case x.file != nil && (!os.SameFile(x.file, fi) || !x.sameLastLine(f)):
@@ -176,17 +254,18 @@ func (x *Index) Refresh() error {
 }
 
 func (x *Index) reset() {
-	x.entries, x.sessions, x.off, x.err, x.lastHead = nil, map[string]*Session{}, 0, nil, nil
+	x.stored, x.sessions, x.off, x.err, x.lastHead = nil, map[string]*Session{}, 0, nil, nil
+	x.newTable()
 }
 
 // sameLastLine reports whether the last line read still starts as it did.
 func (x *Index) sameLastLine(f *os.File) bool {
-	n := len(x.entries)
+	n := len(x.stored)
 	if n == 0 {
 		return true
 	}
 	b := make([]byte, len(x.lastHead))
-	_, err := f.ReadAt(b, x.entries[n-1].Off)
+	_, err := f.ReadAt(b, x.stored[n-1].off)
 	return err == nil && bytes.Equal(b, x.lastHead)
 }
 
@@ -222,26 +301,30 @@ type callHead struct {
 func (x *Index) add(le ledger.Entry, off int64, n int) {
 	var h callHead
 	json.Unmarshal(le.Rec, &h) // a record that does not decode is listed by its seq alone
-	e := Entry{Seq: le.Seq, Off: off, Len: n, Type: h.Type, Time: h.Time, Instance: h.InstanceID}
+	e := Entry{Seq: le.Seq, Off: off, Len: n, Type: x.intern(h.Type), Time: h.Time, Instance: x.intern(h.InstanceID)}
 	if h.Type == record.TypeLLMCall {
 		e.Time = h.Timing.ReceivedAt
-		e.Agent, e.Principal, e.Turn = h.Agent.ID, h.Principal, h.Turn
+		e.Agent, e.Principal, e.Turn = x.intern(h.Agent.ID), x.intern(h.Principal), h.Turn
 		e.Model = h.Upstream.ModelServed
 		if e.Model == "" {
 			e.Model = h.Request.ModelRequested
 		}
+		e.Model = x.intern(e.Model)
 		e.Status = h.Response.Status
 		if h.Error != nil {
-			e.ErrorClass = h.Error.Class
+			e.ErrorClass = x.intern(h.Error.Class)
 		}
 		e.In, e.Out = h.Response.Usage.Input, h.Response.Usage.Output
+		if len(h.Response.ToolCalls) > 0 {
+			e.Tools = make([]Tool, 0, len(h.Response.ToolCalls))
+		}
 		for _, tc := range h.Response.ToolCalls {
-			e.Tools = append(e.Tools, Tool{Name: tc.Name, Risk: tc.Risk, InText: tc.InText})
+			e.Tools = append(e.Tools, Tool{Name: x.intern(tc.Name), Risk: x.intern(tc.Risk), InText: tc.InText})
 		}
 		e.Anomalies = h.Anomalies
 		e.Session = x.addToSession(&e, h.Session, h.Timing.CompletedAt)
 	}
-	x.entries = append(x.entries, e)
+	x.stored = append(x.stored, x.pack(e))
 }
 
 func (x *Index) addToSession(e *Entry, rs record.Session, done time.Time) string {
@@ -252,6 +335,7 @@ func (x *Index) addToSession(e *Entry, rs record.Session, done time.Time) string
 	case rs.Conversation != "":
 		key = "c:" + rs.Conversation
 	}
+	key = x.intern(key)
 	s := x.sessions[key]
 	if s == nil {
 		s = &Session{Key: key, ID: rs.ID, Conversation: rs.Conversation, First: e.Time}
@@ -307,7 +391,7 @@ func (x *Index) Replaced() bool {
 func (x *Index) Len() int {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
-	return len(x.entries)
+	return len(x.stored)
 }
 
 // Stats are totals over the log.
@@ -325,25 +409,26 @@ type Stats struct {
 func (x *Index) Stats(since time.Time) Stats {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
-	st := Stats{Entries: len(x.entries), Sessions: len(x.sessions)}
-	for i := range x.entries {
-		e := &x.entries[i]
-		if e.Type != record.TypeLLMCall {
+	st := Stats{Entries: len(x.stored), Sessions: len(x.sessions)}
+	for i := range x.stored {
+		e := &x.stored[i]
+		if x.str(e.typ) != record.TypeLLMCall {
 			continue
 		}
-		flagged := len(e.Anomalies) > 0
+		t := e.when()
+		flagged := len(e.anomalies) > 0
 		st.Calls++
 		if flagged {
 			st.Flagged++
 		}
-		if !e.Time.Before(since) {
+		if !t.Before(since) {
 			st.CallsSince++
 			if flagged {
 				st.FlaggedSince++
 			}
 		}
-		if e.Time.After(st.Last) {
-			st.Last = e.Time
+		if t.After(st.Last) {
+			st.Last = t
 		}
 	}
 	return st
@@ -369,19 +454,20 @@ func (x *Index) Activity(n int, now time.Time) []Day {
 	first := days[0].Start
 	x.mu.RLock()
 	defer x.mu.RUnlock()
-	for i := range x.entries {
-		e := &x.entries[i]
-		if e.Type != record.TypeLLMCall || e.Time.Before(first) || !e.Time.Before(today.AddDate(0, 0, 1)) {
+	for i := range x.stored {
+		e := &x.stored[i]
+		t := e.when()
+		if x.str(e.typ) != record.TypeLLMCall || t.Before(first) || !t.Before(today.AddDate(0, 0, 1)) {
 			continue
 		}
-		t := e.Time.Local()
+		t = t.Local()
 		d := &days[sort.Search(n, func(j int) bool { return days[j].Start.After(t) })-1]
 		d.Calls++
-		if len(e.Anomalies) > 0 {
+		if len(e.anomalies) > 0 {
 			d.Flagged++
 		}
-		d.In += e.In
-		d.Out += e.Out
+		d.In += int(e.in)
+		d.Out += int(e.out)
 	}
 	return days
 }
@@ -397,8 +483,8 @@ type ToolCount struct {
 func (x *Index) TopTools(n int) []ToolCount {
 	x.mu.RLock()
 	byName := map[string]*ToolCount{}
-	for i := range x.entries {
-		for _, t := range x.entries[i].Tools {
+	for i := range x.stored {
+		for _, t := range x.stored[i].tools {
 			c := byName[t.Name]
 			if c == nil {
 				c = &ToolCount{Name: t.Name}
@@ -429,11 +515,11 @@ func (x *Index) Entries(keep func(*Entry) bool, limit int) ([]Entry, int) {
 	defer x.mu.RUnlock()
 	var out []Entry
 	total := 0
-	for i := len(x.entries) - 1; i >= 0; i-- {
-		if e := &x.entries[i]; keep == nil || keep(e) {
+	for i := len(x.stored) - 1; i >= 0; i-- {
+		if e := x.at(i); keep == nil || keep(&e) {
 			total++
 			if limit == 0 || len(out) < limit {
-				out = append(out, *e)
+				out = append(out, e)
 			}
 		}
 	}
@@ -448,12 +534,12 @@ func (x *Index) Entry(seq uint64) (Entry, bool) {
 	if !ok {
 		return Entry{}, false
 	}
-	return x.entries[i], true
+	return x.at(i), true
 }
 
 func (x *Index) find(seq uint64) (int, bool) {
-	i := sort.Search(len(x.entries), func(i int) bool { return x.entries[i].Seq >= seq })
-	return i, i < len(x.entries) && x.entries[i].Seq == seq
+	i := sort.Search(len(x.stored), func(i int) bool { return uint64(x.stored[i].seq) >= seq })
+	return i, i < len(x.stored) && uint64(x.stored[i].seq) == seq
 }
 
 // Sessions returns every session, most recently active first.
@@ -495,7 +581,7 @@ func (x *Index) Session(key string, before uint64, limit int) (Session, []Entry,
 	calls := make([]Entry, 0, len(seqs))
 	for _, seq := range seqs {
 		if i, ok := x.find(seq); ok {
-			calls = append(calls, x.entries[i])
+			calls = append(calls, x.at(i))
 		}
 	}
 	c := *s
