@@ -26,6 +26,7 @@
 </header>
 <p class="live" id="live" hidden><span id="live-count"></span> <a href="">Reload</a></p>
 {{if .Shrunk}}<p class="banner bad">The log became shorter while the dashboard was reading it: entries were removed from its end. Check its integrity against a copy of the checkpoints kept elsewhere.</p>{{end}}
+{{if .Replaced}}<p class="banner bad">The log file was replaced, or entries already read were rewritten, while the dashboard was reading it. It has been read again from the start. Check its integrity.</p>{{end}}
 {{if .IndexErr}}<p class="banner bad">The dashboard stopped reading the log: {{.IndexErr}}. Entries after that point are not shown.</p>{{end}}
 <main>
 {{template "content" .}}

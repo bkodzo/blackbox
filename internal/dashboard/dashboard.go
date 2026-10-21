@@ -65,7 +65,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, idx: idx, mux: http.NewServeMux(), hosts: map[string]bool{"localhost": true}}
 	for _, h := range cfg.AllowedHosts {
-		s.hosts[strings.ToLower(h)] = true
+		s.hosts[normalHost(h)] = true
 	}
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
@@ -153,15 +153,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) allowedHost(hostport string) bool {
-	host := hostport
-	if h, _, err := net.SplitHostPort(hostport); err == nil {
-		host = h
-	}
-	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	host := normalHost(hostport)
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return true
 	}
 	return s.hosts[host]
+}
+
+// normalHost reduces a host, with or without a port, to the form compared:
+// lower case, without brackets or a trailing dot.
+func normalHost(hostport string) string {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
 }
 
 // sameOrigin reports whether a request that acts came from a dashboard page.

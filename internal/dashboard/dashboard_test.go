@@ -200,3 +200,43 @@ func TestTheLogIsNeverWritten(t *testing.T) {
 		t.Fatal("the dashboard changed the log or its checkpoints")
 	}
 }
+
+func TestAllowedHostsGivenWithPorts(t *testing.T) {
+	s, err := New(Config{Log: newFixture(t).logPath, AllowedHosts: []string{"Audit.Internal:8090", "[fd00::1]:8090", "review.example."}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"audit.internal:8090", "audit.internal", "[fd00::1]:9000", "review.example"} {
+		if !s.allowedHost(h) {
+			t.Errorf("Host %q refused", h)
+		}
+	}
+}
+
+func TestLongSessionsArePaged(t *testing.T) {
+	dir := t.TempDir()
+	pub, key, _ := ed25519.GenerateKey(nil)
+	logPath, cpPath := filepath.Join(dir, "log.jsonl"), filepath.Join(dir, "cp.jsonl")
+	l, _ := ledger.Open(logPath, key, ledger.Options{CheckpointPath: cpPath})
+	for range listLimit + 20 {
+		b, _ := json.Marshal(record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "long"}})
+		l.Append(b)
+	}
+	l.Close()
+	s, err := New(Config{Log: logPath, Checkpoints: cpPath, Pub: pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{logPath: logPath, cpPath: cpPath, pub: pub, srv: s}
+	_, body := f.get(t, "/session?key=s:long")
+	if n := strings.Count(body, `<li`); n > listLimit+5 {
+		t.Fatalf("the newest page lists %d items", n)
+	}
+	if !strings.Contains(body, "Showing 500 of 520 calls") || !strings.Contains(body, "before=21") {
+		t.Fatal("no link to earlier calls")
+	}
+	_, body = f.get(t, "/session?key=s:long&before=21")
+	if !strings.Contains(body, `href="/call/20"`) || strings.Contains(body, `href="/call/21"`) || strings.Contains(body, "Earlier calls") {
+		t.Fatal("the earlier page does not list exactly the earlier calls")
+	}
+}

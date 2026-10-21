@@ -89,14 +89,14 @@ func TestSummariesAndSessions(t *testing.T) {
 	if got := strings.Join(names, ","); got != "(no session),conversation abcd,run-1,run-2" {
 		t.Fatalf("sessions, most recent first: %s", got)
 	}
-	s, calls, ok := x.Session("s:run-1")
+	s, calls, ok := x.Session("s:run-1", 0, 0)
 	if !ok || s.Calls != 2 || s.Tools != 2 || s.In != 20 || s.Agent != "agent-1" || len(calls) != 2 || calls[0].Seq != 2 || calls[1].Seq != 4 {
 		t.Fatalf("run-1: %+v, calls %+v", s, calls)
 	}
 	if !s.First.Equal(f.t0.Add(time.Minute)) || !s.Last.Equal(f.t0.Add(3*time.Minute+time.Second)) {
 		t.Fatalf("run-1 spans %v to %v", s.First, s.Last)
 	}
-	flagged := x.Entries(func(e *Entry) bool { return len(e.Anomalies) > 0 }, 0)
+	flagged, _ := x.Entries(func(e *Entry) bool { return len(e.Anomalies) > 0 }, 0)
 	if len(flagged) != 1 || flagged[0].Seq != 3 || flagged[0].Anomalies[0].Kind != record.AnomalyOrphanToolResult {
 		t.Fatalf("flagged: %+v", flagged)
 	}
@@ -162,7 +162,7 @@ func TestShrinkingLogIsRebuiltAndReported(t *testing.T) {
 	if !x.Shrunk() || x.Len() != 1 {
 		t.Fatalf("shrunk %v, %d entries", x.Shrunk(), x.Len())
 	}
-	if s, _, _ := x.Session("s:run-1"); s.Calls != 1 {
+	if s, _, _ := x.Session("s:run-1", 0, 0); s.Calls != 1 {
 		t.Fatalf("session kept %d calls from before the rebuild", s.Calls)
 	}
 }
@@ -200,7 +200,7 @@ func TestReadersDuringRefresh(t *testing.T) {
 				default:
 				}
 				for _, s := range x.Sessions() {
-					x.Session(s.Key)
+					x.Session(s.Key, 0, 10)
 				}
 				x.Entries(nil, 10)
 			}
@@ -214,5 +214,93 @@ func TestReadersDuringRefresh(t *testing.T) {
 	wg.Wait()
 	if x.Len() != 51 {
 		t.Fatalf("indexed %d entries, want 51", x.Len())
+	}
+}
+
+func TestReplacedLogIsReadAgain(t *testing.T) {
+	a, b := newFixture(t), newFixture(t)
+	for i := range 3 {
+		a.call(t, "old", i)
+	}
+	for i := range 6 {
+		b.call(t, "new", i)
+	}
+	a.l.Close()
+	b.l.Close()
+	x, _ := Open(a.path)
+	// Another log moved over this one, longer than what was read.
+	if err := os.Rename(b.path, a.path); err != nil {
+		t.Fatal(err)
+	}
+	x.Refresh()
+	if !x.Replaced() || x.Len() != 6 || x.Err() != nil {
+		t.Fatalf("replaced %v, %d entries, err %v", x.Replaced(), x.Len(), x.Err())
+	}
+	if _, _, ok := x.Session("s:old", 0, 0); ok {
+		t.Fatal("sessions from the old file were kept")
+	}
+}
+
+func TestRewrittenEntryIsNoticed(t *testing.T) {
+	f := newFixture(t)
+	for i := range 3 {
+		f.call(t, "run-1", i)
+	}
+	f.l.Close()
+	x, _ := Open(f.path)
+	// The same file, rewritten in place with a different last entry of the
+	// same length, then appended to.
+	b, _ := os.ReadFile(f.path)
+	lines := strings.SplitAfter(string(b), "\n")
+	lines[2] = strings.Replace(lines[2], `"seq":3`, `"seq":9`, 1)
+	os.WriteFile(f.path, []byte(strings.Join(lines, "")+lines[0]), 0o600)
+	x.Refresh()
+	if !x.Replaced() {
+		t.Fatal("a rewritten entry was not noticed")
+	}
+}
+
+func TestCopyRewrittenInPlaceClearsTheWarning(t *testing.T) {
+	f := newFixture(t)
+	for i := range 3 {
+		f.call(t, "run-1", i)
+	}
+	f.l.Close()
+	full, _ := os.ReadFile(f.path)
+	x, _ := Open(f.path)
+	// A copy being refreshed with cp: truncated, then written again.
+	os.WriteFile(f.path, full[:len(full)/3], 0o600)
+	x.Refresh()
+	if !x.Shrunk() {
+		t.Fatal("missing entries were not reported")
+	}
+	os.WriteFile(f.path, full, 0o600)
+	x.Refresh()
+	if x.Shrunk() || x.Replaced() || x.Len() != 3 {
+		t.Fatalf("after the copy finished: shrunk %v, replaced %v, %d entries", x.Shrunk(), x.Replaced(), x.Len())
+	}
+}
+
+func TestPagesThroughALongSession(t *testing.T) {
+	f := newFixture(t)
+	for i := range 25 {
+		f.call(t, "long", i)
+	}
+	x, _ := Open(f.path)
+	s, last, _ := x.Session("s:long", 0, 10)
+	if s.Calls != 25 || len(last) != 10 || last[0].Seq != 16 || last[9].Seq != 25 {
+		t.Fatalf("newest page: %d calls, %d shown, %d to %d", s.Calls, len(last), last[0].Seq, last[len(last)-1].Seq)
+	}
+	_, prev, _ := x.Session("s:long", last[0].Seq, 10)
+	if len(prev) != 10 || prev[0].Seq != 6 || prev[9].Seq != 15 {
+		t.Fatalf("previous page: %d to %d", prev[0].Seq, prev[len(prev)-1].Seq)
+	}
+	_, first, _ := x.Session("s:long", prev[0].Seq, 10)
+	if len(first) != 5 || first[0].Seq != 1 {
+		t.Fatalf("first page: %d calls from %d", len(first), first[0].Seq)
+	}
+	rows, total := x.Entries(nil, 4)
+	if len(rows) != 4 || total != 25 || rows[0].Seq != 25 {
+		t.Fatalf("limited list: %d rows of %d, newest %d", len(rows), total, rows[0].Seq)
 	}
 }

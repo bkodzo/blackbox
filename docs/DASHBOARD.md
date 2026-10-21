@@ -40,16 +40,19 @@ opened, so memory grows with the number of entries, not their size.
 It then follows the log as the gateway appends to it, checking for new
 entries every second. Open pages say when new entries arrive. A final line
 still being written is skipped until it is complete. If the log becomes
-shorter than what was read, entries were removed from its end; every page then
-says so in red.
+shorter than what was read, entries were removed from its end; every page
+says so in red until those entries are back, as they are once a copy being
+rewritten in place is complete. If the file is replaced, or an entry already
+read changes, the log is read again from the start and every page says so.
 
 Lists read the log without checking it. Whether the log can be trusted is
 decided on the Integrity page by the same code as `blackbox verify`, so the
 two always agree. The check runs when the dashboard starts and whenever
 someone presses "Check again now".
 
-Lists show at most 500 rows, and the entry page shows the first 256 KiB of
-each body; the downloaded entry has everything.
+Lists show at most 500 rows; a longer session shows its 500 most recent calls
+with a link to earlier ones. The entry page shows the first 256 KiB of each
+body; the downloaded entry has everything.
 
 ## Security
 

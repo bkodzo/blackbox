@@ -134,13 +134,14 @@ type page struct {
 	Integrity integrity
 	IndexErr  error
 	Shrunk    bool
+	Replaced  bool
 	Data      any
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name, title string, data any) {
 	p := page{
 		Title: title, Nav: name, Log: s.cfg.Log, Entries: s.idx.Len(),
-		Integrity: s.integrity(), IndexErr: s.idx.Err(), Shrunk: s.idx.Shrunk(), Data: data,
+		Integrity: s.integrity(), IndexErr: s.idx.Err(), Shrunk: s.idx.Shrunk(), Replaced: s.idx.Replaced(), Data: data,
 	}
 	var buf bytes.Buffer
 	if err := s.pages[name].ExecuteTemplate(&buf, "layout", p); err != nil {
@@ -160,15 +161,13 @@ func (s *Server) notFound(w http.ResponseWriter, what string) {
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	day := time.Now().Add(-24 * time.Hour)
 	isCall := func(e *index.Entry) bool { return e.Type == record.TypeLLMCall }
+	attention, _ := s.idx.Entries(func(e *index.Entry) bool { return len(e.Anomalies) > 0 }, 8)
+	recent, _ := s.idx.Entries(isCall, 10)
 	s.render(w, http.StatusOK, "overview", "Overview", struct {
 		Stats     index.Stats
 		Attention []index.Entry
 		Recent    []index.Entry
-	}{
-		Stats:     s.idx.Stats(day),
-		Attention: s.idx.Entries(func(e *index.Entry) bool { return len(e.Anomalies) > 0 }, 8),
-		Recent:    s.idx.Entries(isCall, 10),
-	})
+	}{s.idx.Stats(day), attention, recent})
 }
 
 func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
@@ -199,15 +198,26 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	ss, calls, ok := s.idx.Session(key)
+	before, _ := strconv.ParseUint(r.URL.Query().Get("before"), 10, 64)
+	ss, calls, ok := s.idx.Session(key, before, listLimit)
 	if !ok {
 		s.notFound(w, "No session with that key is in the log.")
 		return
 	}
+	// Earlier is the entry to page back from, when older calls exist.
+	var earlier uint64
+	if len(calls) > 0 {
+		if _, older, _ := s.idx.Session(key, calls[0].Seq, 1); len(older) > 0 {
+			earlier = calls[0].Seq
+		}
+	}
 	s.render(w, http.StatusOK, "session", "Session "+ss.Name(), struct {
 		Session index.Session
 		Calls   []index.Entry
-	}{ss, calls})
+		Earlier uint64
+		Paged   bool
+		Limit   int
+	}{ss, calls, earlier, before > 0, listLimit})
 }
 
 func (s *Server) flags(w http.ResponseWriter, r *http.Request) {
@@ -215,8 +225,7 @@ func (s *Server) flags(w http.ResponseWriter, r *http.Request) {
 	kind, agent := q.Get("kind"), strings.TrimSpace(q.Get("agent"))
 	from, _ := time.ParseInLocation("2006-01-02", q.Get("from"), time.Local)
 	to, _ := time.ParseInLocation("2006-01-02", q.Get("to"), time.Local)
-	total := 0
-	rows := s.idx.Entries(func(e *index.Entry) bool {
+	rows, total := s.idx.Entries(func(e *index.Entry) bool {
 		switch {
 		case len(e.Anomalies) == 0,
 			kind != "" && !slices.ContainsFunc(e.Anomalies, func(a record.Anomaly) bool { return a.Kind == kind }),
@@ -225,12 +234,8 @@ func (s *Server) flags(w http.ResponseWriter, r *http.Request) {
 			!to.IsZero() && !e.Time.Before(to.AddDate(0, 0, 1)):
 			return false
 		}
-		total++
 		return true
-	}, 0)
-	if len(rows) > listLimit {
-		rows = rows[:listLimit]
-	}
+	}, listLimit)
 	kinds := make([]string, 0, len(flagInfos))
 	for k := range flagInfos {
 		kinds = append(kinds, k)

@@ -86,8 +86,22 @@ type Index struct {
 	sessions map[string]*Session
 	off      int64 // bytes of complete lines read so far
 	err      error // set when an entry could not be read; indexing stops there
-	shrunk   bool  // the file became shorter than what was read
+
+	file     os.FileInfo // the file read so far, to notice it being replaced
+	lastHead []byte      // the start of the last line read, to notice it changing
+	// lost is the last entry read before the file became shorter. Shrunk
+	// reports it until the file holds that entry again, as it does once a
+	// copy being rewritten in place is complete.
+	lost     []byte
+	lostSeq  uint64
+	replaced bool // the file was replaced or rewritten with other content
 }
+
+// headLen is how much of a line is kept to recognize it: enough to include
+// its seq and hash, which no other entry shares.
+const headLen = 256
+
+func lineHead(line []byte) []byte { return bytes.Clone(line[:min(len(line), headLen)]) }
 
 // Open reads the log at path into a new index.
 func Open(path string) (*Index, error) {
@@ -101,7 +115,9 @@ func Open(path string) (*Index, error) {
 // Refresh reads entries appended since the last call. A final line without
 // its newline is still being written and is left for a later call. If the
 // file has become shorter than what was read, entries were removed: the
-// index is rebuilt from the start and Shrunk reports it.
+// index is rebuilt from the start and Shrunk reports it. If the file was
+// replaced, or its last entry read so far has changed, it is rebuilt too and
+// Replaced reports it.
 func (x *Index) Refresh() error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -114,10 +130,17 @@ func (x *Index) Refresh() error {
 	if err != nil {
 		return err
 	}
-	if fi.Size() < x.off {
-		x.entries, x.sessions, x.off, x.err = nil, map[string]*Session{}, 0, nil
-		x.shrunk = true
+	switch {
+	case fi.Size() < x.off:
+		if n := len(x.entries); n > 0 && x.lost == nil {
+			x.lost, x.lostSeq = x.lastHead, x.entries[n-1].Seq
+		}
+		x.reset()
+	case x.file != nil && (!os.SameFile(x.file, fi) || !x.sameLastLine(f)):
+		x.replaced = true
+		x.reset()
 	}
+	x.file = fi
 	if x.err != nil || fi.Size() == x.off {
 		return nil
 	}
@@ -132,6 +155,7 @@ func (x *Index) Refresh() error {
 			break // nothing more, or a line still being written
 		}
 		if err != nil {
+			x.off = off // keep what was read, so it is not added twice
 			return err
 		}
 		body := bytes.TrimSuffix(line, []byte{'\n'})
@@ -141,10 +165,29 @@ func (x *Index) Refresh() error {
 			break
 		}
 		x.add(e, off, len(body))
+		x.lastHead = lineHead(body)
+		if x.lost != nil && e.Seq == x.lostSeq && bytes.Equal(x.lastHead, x.lost) {
+			x.lost, x.lostSeq = nil, 0 // the removed entries are back
+		}
 		off += int64(len(line))
 	}
 	x.off = off
 	return nil
+}
+
+func (x *Index) reset() {
+	x.entries, x.sessions, x.off, x.err, x.lastHead = nil, map[string]*Session{}, 0, nil, nil
+}
+
+// sameLastLine reports whether the last line read still starts as it did.
+func (x *Index) sameLastLine(f *os.File) bool {
+	n := len(x.entries)
+	if n == 0 {
+		return true
+	}
+	b := make([]byte, len(x.lastHead))
+	_, err := f.ReadAt(b, x.entries[n-1].Off)
+	return err == nil && bytes.Equal(b, x.lastHead)
 }
 
 // callHead is the part of a record the index keeps. Bodies are not decoded.
@@ -244,12 +287,20 @@ func (x *Index) Err() error {
 	return x.err
 }
 
-// Shrunk reports whether the file was ever found shorter than what had been
-// read, which means entries were removed from its end.
+// Shrunk reports whether entries read earlier are missing from the end of
+// the file.
 func (x *Index) Shrunk() bool {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
-	return x.shrunk
+	return x.lost != nil
+}
+
+// Replaced reports whether the file was ever replaced, or its entries
+// rewritten, while it was being read.
+func (x *Index) Replaced() bool {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	return x.replaced
 }
 
 // Len returns the number of entries indexed.
@@ -298,21 +349,22 @@ func (x *Index) Stats(since time.Time) Stats {
 	return st
 }
 
-// Entries returns the entries for which keep returns true, newest first, at
-// most limit of them (0 for no limit).
-func (x *Index) Entries(keep func(*Entry) bool, limit int) []Entry {
+// Entries returns the newest entries for which keep returns true, at most
+// limit of them (0 for no limit), and how many entries match in all.
+func (x *Index) Entries(keep func(*Entry) bool, limit int) ([]Entry, int) {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
 	var out []Entry
+	total := 0
 	for i := len(x.entries) - 1; i >= 0; i-- {
 		if e := &x.entries[i]; keep == nil || keep(e) {
-			out = append(out, *e)
-			if limit > 0 && len(out) == limit {
-				break
+			total++
+			if limit == 0 || len(out) < limit {
+				out = append(out, *e)
 			}
 		}
 	}
-	return out
+	return out, total
 }
 
 // Entry returns the summary of the entry with the given seq.
@@ -350,16 +402,25 @@ func (x *Index) Sessions() []Session {
 	return out
 }
 
-// Session returns the session with the given key and its calls in log order.
-func (x *Index) Session(key string) (Session, []Entry, bool) {
+// Session returns the session with the given key and, in log order, its
+// last limit calls (0 for all) before the entry numbered before (0 for the
+// newest).
+func (x *Index) Session(key string, before uint64, limit int) (Session, []Entry, bool) {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
 	s, ok := x.sessions[key]
 	if !ok {
 		return Session{}, nil, false
 	}
-	calls := make([]Entry, 0, len(s.seqs))
-	for _, seq := range s.seqs {
+	seqs := s.seqs
+	if before > 0 {
+		seqs = seqs[:sort.Search(len(seqs), func(i int) bool { return seqs[i] >= before })]
+	}
+	if limit > 0 && len(seqs) > limit {
+		seqs = seqs[len(seqs)-limit:]
+	}
+	calls := make([]Entry, 0, len(seqs))
+	for _, seq := range seqs {
 		if i, ok := x.find(seq); ok {
 			calls = append(calls, x.entries[i])
 		}
