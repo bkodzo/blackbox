@@ -6,6 +6,43 @@
   <div class="card{{if .Stats.Flagged}} attention{{end}}"><span class="n">{{.Stats.Flagged}}</span> flagged calls<small>{{.Stats.FlaggedSince}} in the last 24 hours</small></div>
 </section>
 
+{{with .Activity}}
+<h2>Activity, last 30 days</h2>
+<div class="charts">
+  <figure>
+    {{template "chart" .Calls}}
+    <figcaption><span class="key calls"></span> calls <span class="key flagged"></span> flagged calls</figcaption>
+  </figure>
+  <figure>
+    {{template "chart" .Tokens}}
+    <figcaption><span class="key tokens-in"></span> tokens in <span class="key tokens-out"></span> tokens out</figcaption>
+  </figure>
+</div>
+<details>
+  <summary>Show as a table</summary>
+  <table>
+    <thead><tr><th>Day</th><th>Calls</th><th>Flagged</th><th>Tokens in</th><th>Tokens out</th></tr></thead>
+    <tbody>{{range .Days}}<tr><td>{{day .Start}}</td><td>{{.Calls}}</td><td>{{.Flagged}}</td><td>{{.In}}</td><td>{{.Out}}</td></tr>{{end}}</tbody>
+  </table>
+</details>
+{{if .Tools}}
+<h2>Tools used most</h2>
+<table class="tools-used">
+  <thead><tr><th>Tool</th><th>Risk</th><th>Calls</th><th></th></tr></thead>
+  <tbody>
+  {{range .Tools}}
+  <tr>
+    <td><span class="tool risk-{{orDash .Risk}}">{{.Name}}</span></td>
+    <td>{{orDash .Risk}}</td>
+    <td>{{.Calls}}</td>
+    <td><svg class="meter" width="160" height="10" aria-hidden="true"><rect class="risk-{{orDash .Risk}}" width="{{.W}}" height="10"></rect></svg></td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}
+
 <h2>Needs attention</h2>
 {{if .Attention}}
 <table>
@@ -49,3 +86,18 @@
 <p class="empty">No model calls recorded yet.</p>
 {{end}}
 {{end}}{{end}}
+
+{{define "chart"}}
+<svg class="chart" viewBox="0 0 {{.W}} {{.H}}" role="img" aria-label="{{.Label}}">
+  <text class="scale" x="0" y="14">{{.Max}}</text>
+  <line class="axis" x1="0" y1="{{.Base}}" x2="{{.W}}" y2="{{.Base}}"></line>
+  {{$c := .}}
+  {{range .Bars}}
+  <g><title>{{.Title}}</title>
+    {{if .Lo.H}}<rect class="{{$c.LoClass}}" x="{{.X}}" y="{{.Lo.Y}}" width="{{.W}}" height="{{.Lo.H}}"></rect>{{end}}
+    {{if .Hi.H}}<rect class="{{$c.HiClass}}" x="{{.X}}" y="{{.Hi.Y}}" width="{{.W}}" height="{{.Hi.H}}"></rect>{{end}}
+  </g>
+  {{end}}
+  {{range .Ticks}}<text class="tick" x="{{.X}}" y="{{$c.H}}" text-anchor="{{.Anchor}}">{{.Text}}</text>{{end}}
+</svg>
+{{end}}

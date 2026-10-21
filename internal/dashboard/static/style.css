@@ -117,3 +117,19 @@ pre.body { max-height: 480px; overflow: auto; padding: 12px; background: var(--p
   .facts { grid-template-columns: 1fr; }
   .facts dt { margin-top: 6px; }
 }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+figure { margin: 0; }
+figcaption { color: var(--muted); font-size: 13px; }
+.chart { width: 100%; height: auto; display: block; }
+.chart .axis { stroke: var(--line); }
+.chart text { fill: var(--muted); font-size: 15px; }
+.chart .calls, .key.calls { fill: var(--link); background: var(--link); }
+.chart .flagged, .key.flagged { fill: var(--bad); background: var(--bad); }
+.chart .tokens-in, .key.tokens-in { fill: var(--muted); background: var(--muted); }
+.chart .tokens-out, .key.tokens-out { fill: var(--ok); background: var(--ok); }
+.key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: -1px; }
+details { margin: 8px 0; }
+summary { cursor: pointer; color: var(--muted); }
+.meter rect { fill: var(--link); }
+.meter rect.risk-high { fill: var(--bad); }
+.meter rect.risk-medium { fill: var(--warn); }

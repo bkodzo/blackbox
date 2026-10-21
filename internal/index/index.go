@@ -349,6 +349,79 @@ func (x *Index) Stats(since time.Time) Stats {
 	return st
 }
 
+// Day is activity on one calendar day.
+type Day struct {
+	Start   time.Time // midnight, local time
+	Calls   int
+	Flagged int
+	In, Out int // tokens
+}
+
+// Activity returns one Day for each of the n days ending with the day of
+// now, oldest first, counting calls by when they were received.
+func (x *Index) Activity(n int, now time.Time) []Day {
+	now = now.Local()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	days := make([]Day, n)
+	for i := range days {
+		days[i].Start = today.AddDate(0, 0, i-n+1)
+	}
+	first := days[0].Start
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	for i := range x.entries {
+		e := &x.entries[i]
+		if e.Type != record.TypeLLMCall || e.Time.Before(first) || !e.Time.Before(today.AddDate(0, 0, 1)) {
+			continue
+		}
+		t := e.Time.Local()
+		d := &days[sort.Search(n, func(j int) bool { return days[j].Start.After(t) })-1]
+		d.Calls++
+		if len(e.Anomalies) > 0 {
+			d.Flagged++
+		}
+		d.In += e.In
+		d.Out += e.Out
+	}
+	return days
+}
+
+// ToolCount is how often the model asked to use a tool.
+type ToolCount struct {
+	Name  string
+	Risk  string // as recorded on the most recent call
+	Calls int
+}
+
+// TopTools returns the n tools the model asked to use most, most used first.
+func (x *Index) TopTools(n int) []ToolCount {
+	x.mu.RLock()
+	byName := map[string]*ToolCount{}
+	for i := range x.entries {
+		for _, t := range x.entries[i].Tools {
+			c := byName[t.Name]
+			if c == nil {
+				c = &ToolCount{Name: t.Name}
+				byName[t.Name] = c
+			}
+			c.Calls++
+			c.Risk = t.Risk
+		}
+	}
+	x.mu.RUnlock()
+	out := make([]ToolCount, 0, len(byName))
+	for _, c := range byName {
+		out = append(out, *c)
+	}
+	slices.SortFunc(out, func(a, b ToolCount) int {
+		if a.Calls != b.Calls {
+			return b.Calls - a.Calls
+		}
+		return cmpString(a.Name, b.Name)
+	})
+	return out[:min(n, len(out))]
+}
+
 // Entries returns the newest entries for which keep returns true, at most
 // limit of them (0 for no limit), and how many entries match in all.
 func (x *Index) Entries(keep func(*Entry) bool, limit int) ([]Entry, int) {

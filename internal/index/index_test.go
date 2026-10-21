@@ -304,3 +304,40 @@ func TestPagesThroughALongSession(t *testing.T) {
 		t.Fatalf("limited list: %d rows of %d, newest %d", len(rows), total, rows[0].Seq)
 	}
 }
+
+func TestActivityAndTopTools(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now()
+	add := func(daysAgo int, tool string, flags ...string) {
+		c := record.LLMCall{Type: record.TypeLLMCall, Anomalies: nil}
+		for _, k := range flags {
+			c.Anomalies = append(c.Anomalies, record.Anomaly{Kind: k})
+		}
+		c.Response.Usage = record.Usage{Input: 100, Output: 10}
+		if tool != "" {
+			c.Response.ToolCalls = []record.ToolCall{{Name: tool, Risk: "low"}}
+		}
+		c.Timing.ReceivedAt = now.AddDate(0, 0, -daysAgo)
+		f.append(t, c)
+	}
+	add(0, "read_file")
+	add(0, "read_file", record.AnomalyHighRiskTool)
+	add(2, "run_shell")
+	add(40, "read_file") // outside the window
+	x, _ := Open(f.path)
+	days := x.Activity(7, now)
+	if len(days) != 7 || days[6].Calls != 2 || days[6].Flagged != 1 || days[6].In != 200 || days[4].Calls != 1 {
+		t.Fatalf("activity %+v", days)
+	}
+	total := 0
+	for _, d := range days {
+		total += d.Calls
+	}
+	if total != 3 {
+		t.Fatalf("%d calls in the window, want 3", total)
+	}
+	top := x.TopTools(1)
+	if len(top) != 1 || top[0].Name != "read_file" || top[0].Calls != 3 {
+		t.Fatalf("top tools %+v", top)
+	}
+}

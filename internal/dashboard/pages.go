@@ -71,6 +71,8 @@ var funcs = template.FuncMap{
 	"prev":        func(n uint64) uint64 { return n - 1 },
 	"next":        func(n uint64) uint64 { return n + 1 },
 	"flag":        flag,
+	"short":       short,
+	"day":         func(t time.Time) string { return t.Format("Mon Jan 2") },
 	"errorTitle":  errorTitle,
 	"plural": func(n int, one, many string) string {
 		if n == 1 {
@@ -167,7 +169,8 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		Stats     index.Stats
 		Attention []index.Entry
 		Recent    []index.Entry
-	}{s.idx.Stats(day), attention, recent})
+		Activity  activity
+	}{s.idx.Stats(day), attention, recent, buildActivity(s.idx, time.Now())})
 }
 
 func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
