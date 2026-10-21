@@ -13,6 +13,10 @@ proves the record has not been changed since it was written.
 It does not depend on a particular model or provider, and it is a single Go
 binary with no dependencies.
 
+**[See the dashboard on a sample log](https://bkodzo.github.io/blackbox/)**, and
+[the same log with one entry edited](https://bkodzo.github.io/blackbox/tampered/integrity.html).
+The sample's traffic is scripted; no model was used.
+
 ## What it catches
 
 A small local model was given a folder of notes. After its first tool call, the
@@ -71,9 +75,10 @@ blackbox dashboard         # browse it at http://127.0.0.1:8090
 ```
 
 The [dashboard](docs/DASHBOARD.md) is a read-only web view for auditors,
-managers, and security officers: sessions told in plain language, flagged
-calls, every entry in full, and whether the log is intact. It needs only the
-log and the public key, so it can run on an auditor's own machine.
+managers, and security officers: activity, sessions told in plain language,
+flagged calls, every entry in full, printable reports, and whether the log is
+intact. It needs only the log and the public key, so it can run on an
+auditor's own machine.
 
 Settings, agent headers, and the risk map are described in
 [CONFIGURATION.md](docs/CONFIGURATION.md). Running it in a container or on a
@@ -134,7 +139,6 @@ protect against, and [SCHEMA.md](docs/SCHEMA.md) every recorded field.
 
 ## Roadmap
 
-- Dashboard reports, activity charts, and a live demo
 - Auditing tool execution by proxying tool servers
 - Roles, access logging, review and sign-off, and exportable evidence bundles
 - Verified agent identities issued by the gateway

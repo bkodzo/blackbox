@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Dashboard: activity charts and the most used tools on the overview, a
+  printable report for a session or a date range, and `--export` to save
+  every page as static files.
+- A live demo of the dashboard on a scripted sample log and a tampered copy,
+  published by the `demo` workflow.
+
 ## v0.2.0
 
 - `blackbox dashboard`: a read-only web view of the log with overview,

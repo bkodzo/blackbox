@@ -9,7 +9,8 @@ log can be trusted, without the command line.
 blackbox dashboard --log blackbox.jsonl --checkpoints blackbox.checkpoints.jsonl --pub key.pub
 ```
 
-Then open http://127.0.0.1:8090.
+Then open http://127.0.0.1:8090. A [live demo](https://bkodzo.github.io/blackbox/)
+shows it on a scripted sample log.
 
 The dashboard needs only the log, its checkpoints, and the public key, never
 the signing key. It can run on the gateway host, or on an auditor's own
@@ -20,12 +21,13 @@ it cannot slow down or stop agent traffic.
 
 | Page | Shows |
 |---|---|
-| **Overview** | Calls, sessions, and flagged calls in total and in the last 24 hours; the latest flagged calls; the latest calls |
+| **Overview** | Calls, sessions, and flagged calls in total and in the last 24 hours; calls, flags, and tokens per day for 30 days; the tools used most; the latest flagged calls and calls |
 | **Sessions** | Every session, most recent first, searchable by session, agent, or principal, and filterable to sessions with flags |
 | **Session** | What happened in one session, call by call: the tools the model asked to use, their risk, and every flag with its explanation |
 | **Flags** | Every flagged call, filterable by kind, agent, and date, with what each kind means |
 | **Entry** | One entry in full: who sent it, what was asked and answered, tool calls and results, reasoning, both bodies, and its hash and signature. The entry can be downloaded exactly as stored |
 | **Integrity** | Whether the log is intact, with warnings, or tampered with, the checkpoints, and a button to check again |
+| **Report** | A printable summary of one session or a date range: the integrity result, totals, flags by kind, every flagged call, and the session's timeline. Print it to save a PDF |
 
 A strip at the top of every page shows the latest integrity result and how
 many entries were added since it ran.
@@ -53,6 +55,25 @@ someone presses "Check again now".
 Lists show at most 500 rows; a longer session shows its 500 most recent calls
 with a link to earlier ones. The entry page shows the first 256 KiB of each
 body; the downloaded entry has everything.
+
+## Static export
+
+```
+blackbox dashboard --export site --export-note "Snapshot for the March review."
+```
+
+writes every page to the `site` directory as static files, checks the log
+first, and exits. The pages link to each other by file name, so the directory
+can be opened from disk, attached to a ticket, or served by any web server.
+Every entry gets its own page, so exports suit small logs. The snapshot shows
+the integrity result as of when it was made; searching, filtering, and checking
+again need the live dashboard.
+
+The [live demo](https://bkodzo.github.io/blackbox/) is such an export, made by
+the `demo` workflow from a sample written by
+[examples/demolog](../examples/demolog/main.go). That program runs scripted
+agent traffic through blackbox's own recorder, so its flags are the gateway's
+real findings.
 
 ## Security
 
@@ -84,3 +105,5 @@ body; the downloaded entry has everything.
 | `--pub` | `~/.blackbox/key.pub` | Gateway public key |
 | `--listen` | `127.0.0.1:8090` | Address to serve on |
 | `--allow-host` | none | Host name or address the dashboard may be reached under, besides localhost; repeat or separate with commas |
+| `--export` | none | Write every page to this directory as static files, then exit |
+| `--export-note` | none | Text shown at the top of every exported page |
