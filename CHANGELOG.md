@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
 
 - `blackbox dashboard`: a read-only web view of the log with overview,
   sessions, flags, entry, and integrity pages. It follows the log as the
   gateway writes it, reaches its integrity verdict with the same code as
   `blackbox verify`, and needs only the log, checkpoints, and public key.
+- Built with Go 1.27.3, for its certificate verification fix.
 
 ## v0.1.1
 
