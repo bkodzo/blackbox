@@ -1,7 +1,7 @@
 {{define "content"}}{{with .Data}}
 <h1>Flags</h1>
 <p class="note">Flags mark agent behaviour worth reviewing. They come from heuristics, so they can miss unusual cases or flag unusual but honest ones; the signed log is the guarantee.</p>
-<form class="filters" method="get" action="/flags">
+{{if not $.Static}}<form class="filters" method="get" action="/flags">
   <label>Kind
     <select name="kind">
       <option value="">Any</option>
@@ -13,9 +13,9 @@
   <label>From <input type="date" name="from" value="{{.From}}"></label>
   <label>To <input type="date" name="to" value="{{.To}}"></label>
   <button type="submit">Show</button>
-</form>
+</form>{{end}}
 {{if .Kind}}<p class="note">{{(flag .Kind).Meaning}}</p>{{end}}
-{{if or .From .To}}<p class="nav-links"><a href="/report?from={{.From}}&amp;to={{.To}}">Printable report for these dates</a></p>{{end}}
+{{if and (not $.Static) (or .From .To)}}<p class="nav-links"><a href="/report?from={{.From}}&amp;to={{.To}}">Printable report for these dates</a></p>{{end}}
 {{if .Rows}}
 <p class="count">{{plural .Total "flagged call" "flagged calls"}}{{if gt .Total .Limit}}, showing the {{.Limit}} most recent{{end}}.</p>
 <table>
@@ -23,9 +23,9 @@
   <tbody>
   {{range .Rows}}
   <tr>
-    <td><a href="/call/{{.Seq}}">#{{.Seq}}</a></td>
+    <td><a href="{{callURL .Seq}}">#{{.Seq}}</a></td>
     <td>{{ts .Time}}</td>
-    <td><a href="/session?key={{.Session}}">{{sessionName .Session}}</a></td>
+    <td><a href="{{sessionURL .Session 0}}">{{sessionName .Session}}</a></td>
     <td>{{orDash .Agent}}</td>
     <td>{{range .Anomalies}}<p class="anomaly{{if (flag .Kind).Serious}} serious{{end}}"><strong>{{(flag .Kind).Title}}.</strong> {{clip .Detail 200}}</p>{{end}}</td>
   </tr>

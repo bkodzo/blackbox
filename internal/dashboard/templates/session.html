@@ -1,6 +1,6 @@
 {{define "content"}}{{with .Data}}
 <h1>{{.Session.Name}}</h1>
-<p class="nav-links"><a href="/report?key={{.Session.Key}}">Printable report</a></p>
+<p class="nav-links"><a href="{{reportURL .Session.Key}}">Printable report</a></p>
 <dl class="facts">
   <dt>Agent</dt><dd>{{orDash .Session.Agent}}</dd>
   <dt>On behalf of</dt><dd>{{orDash .Session.Principal}}</dd>
@@ -12,12 +12,12 @@
 {{if not .Session.ID}}<p class="note">This agent sent no session ID, so its calls are grouped by the conversation they continue.</p>{{end}}
 
 <h2>What happened</h2>
-{{if gt .Session.Calls (len .Calls)}}<p class="count">Showing {{len .Calls}} of {{.Session.Calls}} calls{{if .Paged}}, before the ones shown on the previous page{{else}}, the most recent{{end}}.{{if .Earlier}} <a href="/session?key={{.Session.Key}}&amp;before={{.Earlier}}">Earlier calls</a>{{end}}</p>{{end}}
+{{if gt .Session.Calls (len .Calls)}}<p class="count">Showing {{len .Calls}} of {{.Session.Calls}} calls{{if .Paged}}, before the ones shown on the previous page{{else}}, the most recent{{end}}.{{if and .Earlier (not $.Static)}} <a href="{{sessionURL .Session.Key .Earlier}}">Earlier calls</a>{{end}}</p>{{end}}
 <ol class="timeline">
 {{range .Calls}}
   <li{{if .Anomalies}} class="flagged"{{end}}>
     <div class="head">
-      <a href="/call/{{.Seq}}">#{{.Seq}}</a>
+      <a href="{{callURL .Seq}}">#{{.Seq}}</a>
       <span>{{clock .Time}}</span>
       {{if .Turn}}<span>turn {{.Turn}}</span>{{end}}
       <span>{{orDash .Model}}</span>

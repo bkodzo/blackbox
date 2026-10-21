@@ -47,6 +47,9 @@ type Server struct {
 	mux   *http.ServeMux
 	hosts map[string]bool
 
+	static bool      // rendering an export: links point at files
+	made   time.Time // when the export was made
+
 	mu        sync.Mutex
 	report    *audit.Report // the latest completed check, or nil
 	reportErr error         // why the latest check reached no verdict
@@ -67,7 +70,7 @@ func New(cfg Config) (*Server, error) {
 	for _, h := range cfg.AllowedHosts {
 		s.hosts[normalHost(h)] = true
 	}
-	if s.pages, err = parsePages(); err != nil {
+	if s.pages, err = parsePages(false); err != nil {
 		return nil, err
 	}
 	static, _ := fs.Sub(files, "static")

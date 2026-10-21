@@ -1,10 +1,10 @@
 {{define "content"}}{{with .Data}}
 <h1>Sessions</h1>
-<form class="filters" method="get" action="/sessions">
+{{if not $.Static}}<form class="filters" method="get" action="/sessions">
   <label>Search <input type="search" name="q" value="{{.Q}}" placeholder="session, agent, or principal"></label>
   <label class="check"><input type="checkbox" name="flagged" value="1"{{if .Flagged}} checked{{end}}> Only sessions with flags</label>
   <button type="submit">Show</button>
-</form>
+</form>{{end}}
 {{if .Rows}}
 <p class="count">{{plural .Total "session" "sessions"}}{{if gt .Total .Limit}}, showing the {{.Limit}} most recent{{end}}.</p>
 <table>
@@ -12,7 +12,7 @@
   <tbody>
   {{range .Rows}}
   <tr{{if .Flags}} class="flagged"{{end}}>
-    <td><a href="/session?key={{.Key}}">{{.Name}}</a></td>
+    <td><a href="{{sessionURL .Key 0}}">{{.Name}}</a></td>
     <td>{{orDash .Agent}}</td>
     <td>{{orDash .Principal}}</td>
     <td>{{.Calls}}</td>

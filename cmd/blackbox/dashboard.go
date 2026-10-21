@@ -37,6 +37,7 @@ func runDashboard(args []string) int {
 	pubPath := fs.String("pub", filepath.Join(keyDir(), "key.pub"), "gateway public key")
 	noCPs := fs.Bool("no-checkpoints", false, "check without a checkpoint file (removals from the end cannot be detected)")
 	listen := fs.String("listen", "127.0.0.1:8090", "address to serve the dashboard on")
+	export := fs.String("export", "", "write every page to this directory as static files, then exit")
 	var hosts hostList
 	fs.Var(&hosts, "allow-host", "host name or address the dashboard may be reached under, besides localhost (repeatable)")
 	fs.Parse(args)
@@ -56,6 +57,14 @@ func runDashboard(args []string) int {
 	s, err := dashboard.New(dashboard.Config{Log: *logPath, Checkpoints: *cpPath, Pub: pub, AllowedHosts: hosts})
 	if err != nil {
 		return fail("%v", err)
+	}
+	if *export != "" {
+		n, err := s.Export(*export)
+		if err != nil {
+			return fail("%v", err)
+		}
+		log.Printf("wrote %d files to %s", n, *export)
+		return 0
 	}
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {

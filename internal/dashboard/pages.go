@@ -2,11 +2,14 @@ package dashboard
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -116,10 +119,52 @@ func sessionName(key string) string {
 	return "(no session)"
 }
 
-func parsePages() (map[string]*template.Template, error) {
+// links returns the functions templates use to link between pages: to the
+// server's paths when live, and to the files of an export otherwise. Export
+// files sit in one directory, so their links are relative and work under
+// any URL prefix.
+func links(static bool) template.FuncMap {
+	if static {
+		return template.FuncMap{
+			"page":       func(name string) string { return name + ".html" },
+			"asset":      func(name string) string { return "static/" + name },
+			"callURL":    func(seq uint64) string { return fmt.Sprintf("call-%d.html", seq) },
+			"rawURL":     func(seq uint64) string { return fmt.Sprintf("call-%d.json", seq) },
+			"sessionURL": func(key string, _ uint64) string { return "session-" + fileKey(key) + ".html" },
+			"reportURL":  func(key string) string { return "report-" + fileKey(key) + ".html" },
+		}
+	}
+	return template.FuncMap{
+		"page": func(name string) string {
+			if name == "index" {
+				return "/"
+			}
+			return "/" + name
+		},
+		"asset":   func(name string) string { return "/static/" + name },
+		"callURL": func(seq uint64) string { return fmt.Sprintf("/call/%d", seq) },
+		"rawURL":  func(seq uint64) string { return fmt.Sprintf("/call/%d/raw", seq) },
+		"sessionURL": func(key string, before uint64) string {
+			u := "/session?key=" + url.QueryEscape(key)
+			if before > 0 {
+				u += fmt.Sprintf("&before=%d", before)
+			}
+			return u
+		},
+		"reportURL": func(key string) string { return "/report?key=" + url.QueryEscape(key) },
+	}
+}
+
+// fileKey turns a session key into a safe, stable file name part.
+func fileKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:8])
+}
+
+func parsePages(static bool) (map[string]*template.Template, error) {
 	pages := map[string]*template.Template{}
 	for _, name := range []string{"overview", "sessions", "session", "flags", "call", "integrity", "report", "error"} {
-		t, err := template.New(name).Funcs(funcs).ParseFS(files, "templates/layout.html", "templates/"+name+".html")
+		t, err := template.New(name).Funcs(funcs).Funcs(links(static)).ParseFS(files, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
 			return nil, err
 		}
@@ -138,13 +183,15 @@ type page struct {
 	IndexErr  error
 	Shrunk    bool
 	Replaced  bool
+	Static    bool      // an exported snapshot rather than the live dashboard
+	Made      time.Time // when the snapshot was made
 	Data      any
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name, title string, data any) {
 	p := page{
 		Title: title, Nav: name, Log: s.cfg.Log, Entries: s.idx.Len(),
-		Integrity: s.integrity(), IndexErr: s.idx.Err(), Shrunk: s.idx.Shrunk(), Replaced: s.idx.Replaced(), Data: data,
+		Integrity: s.integrity(), IndexErr: s.idx.Err(), Shrunk: s.idx.Shrunk(), Replaced: s.idx.Replaced(), Static: s.static, Made: s.made, Data: data,
 	}
 	var buf bytes.Buffer
 	if err := s.pages[name].ExecuteTemplate(&buf, "layout", p); err != nil {
@@ -311,7 +358,9 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request) {
 		Req     shownBody
 		Resp    shownBody
 		Record  string // other entries, shown as indented JSON
+		HasNext bool
 	}{Entry: le, Summary: sum}
+	_, data.HasNext = s.idx.Entry(le.Seq + 1)
 	if sum.Type == record.TypeLLMCall {
 		var c record.LLMCall
 		if err := json.Unmarshal(le.Rec, &c); err == nil {
@@ -421,6 +470,12 @@ func (s *Server) reportPage(w http.ResponseWriter, r *http.Request) {
 		}
 		d.Session, d.Timeline, calls, d.Clipped = &ss, cs, cs, ss.Calls > len(cs)
 		d.Scope = "Session " + ss.Name()
+	case q.Get("all") != "":
+		var total int
+		calls, total = s.idx.Entries(func(e *index.Entry) bool { return e.Type == record.TypeLLMCall }, reportLimit)
+		d.Clipped = total > len(calls)
+		slices.Reverse(calls)
+		d.Scope = "All calls"
 	case d.From != "" || d.To != "":
 		from, ferr := time.ParseInLocation("2006-01-02", d.From, time.Local)
 		to, terr := time.ParseInLocation("2006-01-02", d.To, time.Local)

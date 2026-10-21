@@ -4,28 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} - blackbox</title>
-<link rel="stylesheet" href="/static/style.css">
-<script src="/static/app.js" defer></script>
+{{if .Static}}<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">{{end}}
+<link rel="stylesheet" href="{{asset "style.css"}}">
+{{if not .Static}}<script src="/static/app.js" defer></script>{{end}}
 </head>
 <body data-entries="{{.Entries}}">
 <header>
-  <a class="brand" href="/">blackbox</a>
+  <a class="brand" href="{{page "index"}}">blackbox</a>
   <nav>
-    <a href="/"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a>
-    <a href="/sessions"{{if or (eq .Nav "sessions") (eq .Nav "session")}} aria-current="page"{{end}}>Sessions</a>
-    <a href="/flags"{{if eq .Nav "flags"}} aria-current="page"{{end}}>Flags</a>
-    <a href="/integrity"{{if eq .Nav "integrity"}} aria-current="page"{{end}}>Integrity</a>
-    <a href="/report"{{if eq .Nav "report"}} aria-current="page"{{end}}>Report</a>
+    <a href="{{page "index"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a>
+    <a href="{{page "sessions"}}"{{if or (eq .Nav "sessions") (eq .Nav "session")}} aria-current="page"{{end}}>Sessions</a>
+    <a href="{{page "flags"}}"{{if eq .Nav "flags"}} aria-current="page"{{end}}>Flags</a>
+    <a href="{{page "integrity"}}"{{if eq .Nav "integrity"}} aria-current="page"{{end}}>Integrity</a>
+    <a href="{{page "report"}}"{{if eq .Nav "report"}} aria-current="page"{{end}}>Report</a>
   </nav>
   {{with .Integrity}}
-  <a class="status {{if .Report}}{{verdictClass .Report.Verdict}}{{else if .Err}}bad{{end}}" href="/integrity">
+  <a class="status {{if .Report}}{{verdictClass .Report.Verdict}}{{else if .Err}}bad{{end}}" href="{{page "integrity"}}">
     {{if .Report}}Log {{.Report.Verdict}}{{if .NewSince}}, {{plural .NewSince "entry" "entries"}} since{{end}}
     {{else if .Err}}Log could not be checked
     {{else}}Checking the log{{end}}
   </a>
   {{end}}
 </header>
-<p class="live" id="live" hidden><span id="live-count"></span> <a href="">Reload</a></p>
+{{if .Static}}<p class="live">A static snapshot of {{.Log}}, made {{ts .Made}}. Searching, filtering, and checking again need the live dashboard.</p>
+{{else}}<p class="live" id="live" hidden><span id="live-count"></span> <a href="">Reload</a></p>{{end}}
 {{if .Shrunk}}<p class="banner bad">The log became shorter while the dashboard was reading it: entries were removed from its end. Check its integrity against a copy of the checkpoints kept elsewhere.</p>{{end}}
 {{if .Replaced}}<p class="banner bad">The log file was replaced, or entries already read were rewritten, while the dashboard was reading it. It has been read again from the start. Check its integrity.</p>{{end}}
 {{if .IndexErr}}<p class="banner bad">The dashboard stopped reading the log: {{.IndexErr}}. Entries after that point are not shown.</p>{{end}}

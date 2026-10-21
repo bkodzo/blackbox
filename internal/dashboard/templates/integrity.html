@@ -32,9 +32,9 @@
   {{else}}
   <section class="verdict"><h2>Checking the log</h2><p>This takes a moment for a large log.</p></section>
   {{end}}
-  <form method="post" action="/verify">
+  {{if not $.Static}}<form method="post" action="/verify">
     <button type="submit"{{if .Checking}} disabled{{end}}>{{if .Checking}}Checking...{{else}}Check again now{{end}}</button>
-  </form>
+  </form>{{end}}
 {{end}}
 <p class="note">The check uses the same code as <code>blackbox verify</code>. It proves the log matches the checkpoints given here. Someone who controls the gateway host can cut the log and this checkpoint file together, so also check against a copy of the checkpoints kept on another machine.</p>
 
@@ -46,7 +46,7 @@
 <table>
   <thead><tr><th>Entry</th><th>Written</th><th>Hash</th><th>Key</th></tr></thead>
   <tbody>
-  {{range .CheckpointList}}<tr><td><a href="/call/{{.Seq}}">#{{.Seq}}</a></td><td>{{stamp .Time}}</td><td><code>{{clip .Hash 19}}</code></td><td><code>{{.Kid}}</code></td></tr>{{end}}
+  {{range .CheckpointList}}<tr><td><a href="{{callURL .Seq}}">#{{.Seq}}</a></td><td>{{stamp .Time}}</td><td><code>{{clip .Hash 19}}</code></td><td><code>{{.Kid}}</code></td></tr>{{end}}
   </tbody>
 </table>
 {{else if .Checkpoints}}

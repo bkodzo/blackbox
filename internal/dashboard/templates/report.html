@@ -7,10 +7,10 @@
   <label>To <input type="date" name="to"></label>
   <button type="submit">Make report</button>
 </form>
-<p class="note">For one session, open it from the <a href="/sessions">Sessions</a> page and choose "Printable report".</p>
+<p class="note">For one session, open it from the <a href="{{page "sessions"}}">Sessions</a> page and choose "Printable report".</p>
 {{else}}
 <article class="report">
-<p class="noprint"><a href="/report">Another report</a> &middot; Use the browser's print command to save this page as a PDF.</p>
+<p class="noprint">{{if not $.Static}}<a href="{{page "report"}}">Another report</a> &middot; {{end}}Use the browser's print command to save this page as a PDF.</p>
 <h1>Audit report: {{.Scope}}</h1>
 <dl class="facts">
   <dt>Made</dt><dd>{{ts .Generated}}</dd>

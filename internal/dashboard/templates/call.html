@@ -1,13 +1,13 @@
 {{define "content"}}{{with .Data}}
 <h1>Entry {{.Entry.Seq}}{{if .Call}}: model call{{else}}: {{orDash .Summary.Type}}{{end}}</h1>
 <p class="nav-links">
-  {{if gt .Entry.Seq 1}}<a href="/call/{{.Entry.Seq | prev}}">Previous entry</a>{{end}}
-  <a href="/call/{{.Entry.Seq | next}}">Next entry</a>
-  <a href="/call/{{.Entry.Seq}}/raw">Download the entry as stored</a>
+  {{if gt .Entry.Seq 1}}<a href="{{callURL (prev .Entry.Seq)}}">Previous entry</a>{{end}}
+  {{if .HasNext}}<a href="{{callURL (next .Entry.Seq)}}">Next entry</a>{{end}}
+  <a href="{{rawURL .Entry.Seq}}">Download the entry as stored</a>
 </p>
 {{with .Call}}
 <dl class="facts">
-  <dt>Session</dt><dd><a href="/session?key={{$.Data.Summary.Session}}">{{sessionName $.Data.Summary.Session}}</a>{{if .Turn}}, turn {{.Turn}}{{end}}</dd>
+  <dt>Session</dt><dd><a href="{{sessionURL $.Data.Summary.Session 0}}">{{sessionName $.Data.Summary.Session}}</a>{{if .Turn}}, turn {{.Turn}}{{end}}</dd>
   <dt>Agent</dt><dd>{{orDash .Agent.ID}}{{if .Agent.Version}} {{.Agent.Version}}{{end}} ({{.Identity}})</dd>
   <dt>On behalf of</dt><dd>{{orDash .Principal}}</dd>
   <dt>Client</dt><dd>{{.Client.IP}}{{if .Client.UserAgent}}, {{.Client.UserAgent}}{{end}}</dd>
@@ -44,7 +44,7 @@
 {{if .ToolResultsIn}}
 <h2>Tool results the agent sent back</h2>
 <ul>
-{{range .ToolResultsIn}}<li><code>{{.ToolCallID}}</code>{{if .MatchedSeq}}, answering a call made in <a href="/call/{{.MatchedSeq}}">#{{.MatchedSeq}}</a>{{else}}, matching no call the model made{{end}}</li>{{end}}
+{{range .ToolResultsIn}}<li><code>{{.ToolCallID}}</code>{{if .MatchedSeq}}, answering a call made in <a href="{{callURL .MatchedSeq}}">#{{.MatchedSeq}}</a>{{else}}, matching no call the model made{{end}}</li>{{end}}
 </ul>
 {{end}}
 
@@ -68,7 +68,7 @@
   <dt>Previous</dt><dd><code class="wrap">{{.Entry.Prev}}</code></dd>
   <dt>Signed by key</dt><dd><code>{{.Entry.Kid}}</code></dd>
 </dl>
-<p class="note">These are shown as stored. Whether they are valid is decided on the <a href="/integrity">Integrity</a> page.</p>
+<p class="note">These are shown as stored. Whether they are valid is decided on the <a href="{{page "integrity"}}">Integrity</a> page.</p>
 {{end}}{{end}}
 
 {{define "body"}}
