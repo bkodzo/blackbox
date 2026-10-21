@@ -48,8 +48,11 @@ type Report struct {
 	Result         ledger.Result
 	Calls          int
 	Running        bool // the last gateway run has not shut down
-	Warnings       []string
-	CheckedAt      time.Time
+	// Opened is set once the log was opened, so Result and Calls describe
+	// what was read even when reading it then failed.
+	Opened    bool
+	Warnings  []string
+	CheckedAt time.Time
 }
 
 // Check verifies the log at logPath against pub and the checkpoints at
@@ -82,6 +85,7 @@ func Check(logPath, cpPath string, pub ed25519.PublicKey) (Report, error) {
 		return rep, err
 	}
 	defer f.Close()
+	rep.Opened = true
 
 	var lastType string
 	res, err := ledger.Verify(f, pub, cps, func(e ledger.Entry) {

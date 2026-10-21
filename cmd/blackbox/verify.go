@@ -51,7 +51,7 @@ func runVerify(args []string) int {
 		*cpPath = ""
 	}
 	rep, err := audit.Check(*logPath, *cpPath, pub)
-	if err != nil {
+	if err != nil && !rep.Opened {
 		return failCode(exitError, "%v", err)
 	}
 	if rep.CheckpointsBad {
@@ -65,6 +65,9 @@ func runVerify(args []string) int {
 	fmt.Printf("Signing key:  %s\n", rep.Key)
 	fmt.Printf("Entries:      %d checked (%d model calls)\n", res.Entries, rep.Calls)
 	fmt.Printf("Checkpoints:  %d of %d matched\n", res.Checkpoints, res.CheckpointsTotal)
+	if err != nil {
+		return failCode(exitError, "%v", err)
+	}
 
 	if rep.Verdict == audit.Tampered {
 		fmt.Printf("\nResult: TAMPERED\n  %s\n", rep.Problem)
