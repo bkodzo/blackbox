@@ -15,6 +15,7 @@
   <button type="submit">Show</button>
 </form>
 {{if .Kind}}<p class="note">{{(flag .Kind).Meaning}}</p>{{end}}
+{{if or .From .To}}<p class="nav-links"><a href="/report?from={{.From}}&amp;to={{.To}}">Printable report for these dates</a></p>{{end}}
 {{if .Rows}}
 <p class="count">{{plural .Total "flagged call" "flagged calls"}}{{if gt .Total .Limit}}, showing the {{.Limit}} most recent{{end}}.</p>
 <table>

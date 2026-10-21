@@ -15,6 +15,7 @@
     <a href="/sessions"{{if or (eq .Nav "sessions") (eq .Nav "session")}} aria-current="page"{{end}}>Sessions</a>
     <a href="/flags"{{if eq .Nav "flags"}} aria-current="page"{{end}}>Flags</a>
     <a href="/integrity"{{if eq .Nav "integrity"}} aria-current="page"{{end}}>Integrity</a>
+    <a href="/report"{{if eq .Nav "report"}} aria-current="page"{{end}}>Report</a>
   </nav>
   {{with .Integrity}}
   <a class="status {{if .Report}}{{verdictClass .Report.Verdict}}{{else if .Err}}bad{{end}}" href="/integrity">

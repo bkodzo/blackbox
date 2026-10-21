@@ -1,0 +1,83 @@
+{{define "content"}}{{with .Data}}
+{{if .Form}}
+<h1>Report</h1>
+<p>A printable summary of one session or of the calls in a date range, with the result of the latest integrity check. Use the browser's print command to save it as a PDF.</p>
+<form class="filters" method="get" action="/report">
+  <label>From <input type="date" name="from"></label>
+  <label>To <input type="date" name="to"></label>
+  <button type="submit">Make report</button>
+</form>
+<p class="note">For one session, open it from the <a href="/sessions">Sessions</a> page and choose "Printable report".</p>
+{{else}}
+<article class="report">
+<p class="noprint"><a href="/report">Another report</a> &middot; Use the browser's print command to save this page as a PDF.</p>
+<h1>Audit report: {{.Scope}}</h1>
+<dl class="facts">
+  <dt>Made</dt><dd>{{ts .Generated}}</dd>
+  <dt>Log</dt><dd>{{$.Log}}</dd>
+</dl>
+
+<h2>Integrity</h2>
+{{with $.Integrity}}
+  {{if .Report}}{{with .Report}}
+  <p class="verdict {{verdictClass .Verdict}}">
+    {{if eq (verdictClass .Verdict) "bad"}}The log was tampered with: {{.Problem}}
+    {{else}}The log was intact{{if eq (verdictClass .Verdict) "warn"}}, with warnings,{{end}} when checked at {{ts .CheckedAt}}: every entry unchanged, in order, and signed by key <code>{{.Key}}</code>, with {{.Result.Checkpoints}} of {{.Result.CheckpointsTotal}} checkpoints matched.{{end}}
+  </p>
+  {{if .Warnings}}<ul class="warnings">{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>{{end}}
+  {{end}}
+  {{if .NewSince}}<p class="note">{{plural .NewSince "entry was" "entries were"}} added after that check.</p>{{end}}
+  {{else if .Err}}<p class="verdict bad">The log could not be checked: {{.Err}}</p>
+  {{else}}<p class="verdict">The integrity check had not finished when this report was made.</p>{{end}}
+{{end}}
+<p class="note">This report summarizes the log. The evidence is the signed log itself: run <code>blackbox verify</code> against the gateway's public key and a copy of the checkpoints kept elsewhere to confirm it.</p>
+
+<h2>Summary</h2>
+<dl class="facts">
+  <dt>Model calls</dt><dd>{{.Calls}}{{if .Clipped}} (the first {{.Calls}} that matched; narrow the report to see the rest){{end}}</dd>
+  <dt>Sessions</dt><dd>{{len .Sessions}}</dd>
+  <dt>Flagged calls</dt><dd>{{len .Flagged}}</dd>
+  <dt>Tokens</dt><dd>{{.In}} in, {{.Out}} out</dd>
+</dl>
+{{if .Kinds}}
+<table>
+  <thead><tr><th>Flag</th><th>Times</th><th>Meaning</th></tr></thead>
+  <tbody>{{range .Kinds}}<tr><td>{{(flag .Kind).Title}}</td><td>{{.Count}}</td><td>{{(flag .Kind).Meaning}}</td></tr>{{end}}</tbody>
+</table>
+{{end}}
+
+{{if not .Session}}
+<h2>Sessions</h2>
+{{if .Sessions}}
+<table>
+  <thead><tr><th>Session</th><th>Agent</th><th>On behalf of</th><th>Calls</th><th>Tool calls</th><th>Flags</th><th>First call</th><th>Last call</th></tr></thead>
+  <tbody>{{range .Sessions}}<tr{{if .Flags}} class="flagged"{{end}}><td>{{sessionName .Key}}</td><td>{{orDash .Agent}}</td><td>{{orDash .Principal}}</td><td>{{.Calls}}</td><td>{{.Tools}}</td><td>{{.Flags}}</td><td>{{ts .First}}</td><td>{{ts .Last}}</td></tr>{{end}}</tbody>
+</table>
+{{else}}<p class="empty">No calls in this range.</p>{{end}}
+{{end}}
+
+<h2>Flagged calls</h2>
+{{range .Flagged}}
+<section class="flagged-call">
+  <h3>Entry {{.Seq}}, {{ts .Time}}, {{sessionName .Session}}, agent {{orDash .Agent}}</h3>
+  {{range .Anomalies}}<p class="anomaly{{if (flag .Kind).Serious}} serious{{end}}"><strong>{{(flag .Kind).Title}}.</strong> {{.Detail}}</p>{{end}}
+</section>
+{{else}}
+<p class="empty">Nothing was flagged.</p>
+{{end}}
+
+{{with .Session}}
+<h2>What happened</h2>
+<ol class="timeline">
+{{range $.Data.Timeline}}
+  <li{{if .Anomalies}} class="flagged"{{end}}>
+    <div class="head"><span>#{{.Seq}}</span><span>{{ts .Time}}</span>{{if .Turn}}<span>turn {{.Turn}}</span>{{end}}<span>{{orDash .Model}}</span>{{if .ErrorClass}}<span>{{errorTitle .ErrorClass}}</span>{{else}}<span>status {{.Status}}</span>{{end}}</div>
+    {{if .Tools}}<ul class="tools">{{range .Tools}}<li>The model {{if .InText}}wrote a call to{{else}}asked to use{{end}} {{.Name}}{{if .Risk}} (risk: {{.Risk}}){{end}}.</li>{{end}}</ul>{{end}}
+    {{range .Anomalies}}<p class="anomaly{{if (flag .Kind).Serious}} serious{{end}}"><strong>{{(flag .Kind).Title}}.</strong> {{.Detail}}</p>{{end}}
+  </li>
+{{end}}
+</ol>
+{{end}}
+</article>
+{{end}}
+{{end}}{{end}}

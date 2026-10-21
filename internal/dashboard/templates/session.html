@@ -1,5 +1,6 @@
 {{define "content"}}{{with .Data}}
 <h1>{{.Session.Name}}</h1>
+<p class="nav-links"><a href="/report?key={{.Session.Key}}">Printable report</a></p>
 <dl class="facts">
   <dt>Agent</dt><dd>{{orDash .Session.Agent}}</dd>
   <dt>On behalf of</dt><dd>{{orDash .Session.Principal}}</dd>

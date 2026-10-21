@@ -68,7 +68,8 @@ func (f *fixture) get(t *testing.T, path string) (int, string) {
 	return w.Code, string(b)
 }
 
-var pages = []string{"/", "/sessions", "/sessions?q=script", "/session?key=" + url.QueryEscape("s:"+hostile), "/flags", "/flags?kind=orphan_tool_result", "/call/1", "/call/2", "/call/3", "/integrity"}
+var pages = []string{"/", "/sessions", "/sessions?q=script", "/session?key=" + url.QueryEscape("s:"+hostile), "/flags", "/flags?kind=orphan_tool_result", "/call/1", "/call/2", "/call/3", "/integrity",
+	"/report", "/report?key=" + url.QueryEscape("s:"+hostile), "/report?from=2000-01-01&to=2100-01-01", "/report?to=2100-01-01"}
 
 func TestEveryPageEscapesRecordedText(t *testing.T) {
 	f := newFixture(t)
@@ -238,5 +239,26 @@ func TestLongSessionsArePaged(t *testing.T) {
 	_, body = f.get(t, "/session?key=s:long&before=21")
 	if !strings.Contains(body, `href="/call/20"`) || strings.Contains(body, `href="/call/21"`) || strings.Contains(body, "Earlier calls") {
 		t.Fatal("the earlier page does not list exactly the earlier calls")
+	}
+}
+
+func TestReportContents(t *testing.T) {
+	f := newFixture(t)
+	_, body := f.get(t, "/report?from=2000-01-01&to=2100-01-01")
+	for _, want := range []string{"Audit report: Calls from 2000-01-01 to 2100-01-01", "The log was intact", "Result for a call never made", "<dt>Model calls</dt><dd>1</dd>"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("range report lacks %q", want)
+		}
+	}
+	if _, body := f.get(t, "/report?from=2100-01-01"); !strings.Contains(body, "No calls in this range") {
+		t.Fatal("an empty range is not reported as empty")
+	}
+	for _, bad := range []string{"/report?from=yesterday", "/report?from=2026-02-01&to=2026-01-01"} {
+		if code, _ := f.get(t, bad); code != http.StatusBadRequest {
+			t.Fatalf("%s: status %d", bad, code)
+		}
+	}
+	if code, _ := f.get(t, "/report?key=nope"); code != http.StatusNotFound {
+		t.Fatalf("unknown session: status %d", code)
 	}
 }

@@ -33,6 +33,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /call/{seq}", s.call)
 	s.mux.HandleFunc("GET /call/{seq}/raw", s.raw)
 	s.mux.HandleFunc("GET /integrity", s.integrityPage)
+	s.mux.HandleFunc("GET /report", s.reportPage)
 	s.mux.HandleFunc("POST /verify", s.verify)
 	s.mux.HandleFunc("GET /status.json", s.status)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { s.notFound(w, "There is no page at that address.") })
@@ -117,7 +118,7 @@ func sessionName(key string) string {
 
 func parsePages() (map[string]*template.Template, error) {
 	pages := map[string]*template.Template{}
-	for _, name := range []string{"overview", "sessions", "session", "flags", "call", "integrity", "error"} {
+	for _, name := range []string{"overview", "sessions", "session", "flags", "call", "integrity", "report", "error"} {
 		t, err := template.New(name).Funcs(funcs).ParseFS(files, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
 			return nil, err
@@ -379,4 +380,112 @@ func (s *Server) verify(w http.ResponseWriter, r *http.Request) {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"entries":%d}`, s.idx.Len())
+}
+
+// reportLimit caps the calls a report lists; a report that needs more is
+// better made from the log itself.
+const reportLimit = 2000
+
+// kindCount is how often one kind of anomaly was flagged.
+type kindCount struct {
+	Kind  string
+	Count int
+}
+
+// reportData is a summary of a session or a date range, for printing.
+type reportData struct {
+	Scope     string // what the report covers, in words
+	Form      bool   // no scope was chosen yet
+	From, To  string
+	Generated time.Time
+	Calls     int
+	In, Out   int
+	Sessions  []index.Session
+	Session   *index.Session // set for a report on one session
+	Kinds     []kindCount
+	Flagged   []index.Entry
+	Timeline  []index.Entry // the session's calls, for a report on one session
+	Clipped   bool          // more calls matched than reportLimit
+}
+
+func (s *Server) reportPage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	d := reportData{Generated: time.Now(), From: q.Get("from"), To: q.Get("to")}
+	var calls []index.Entry
+	switch key := q.Get("key"); {
+	case key != "":
+		ss, cs, ok := s.idx.Session(key, 0, reportLimit)
+		if !ok {
+			s.notFound(w, "No session with that key is in the log.")
+			return
+		}
+		d.Session, d.Timeline, calls, d.Clipped = &ss, cs, cs, ss.Calls > len(cs)
+		d.Scope = "Session " + ss.Name()
+	case d.From != "" || d.To != "":
+		from, ferr := time.ParseInLocation("2006-01-02", d.From, time.Local)
+		to, terr := time.ParseInLocation("2006-01-02", d.To, time.Local)
+		if (d.From != "" && ferr != nil) || (d.To != "" && terr != nil) || (d.From != "" && d.To != "" && to.Before(from)) {
+			s.render(w, http.StatusBadRequest, "error", "Bad dates", "Give the dates as year-month-day, with the start no later than the end.")
+			return
+		}
+		var total int
+		calls, total = s.idx.Entries(func(e *index.Entry) bool {
+			return e.Type == record.TypeLLMCall && (from.IsZero() || !e.Time.Before(from)) && (to.IsZero() || e.Time.Before(to.AddDate(0, 0, 1)))
+		}, reportLimit)
+		d.Clipped = total > len(calls)
+		slices.Reverse(calls)
+		d.Scope = "Calls " + describeRange(d.From, d.To)
+	default:
+		d.Form = true
+		s.render(w, http.StatusOK, "report", "Report", d)
+		return
+	}
+
+	kinds := map[string]int{}
+	bySession := map[string]*index.Session{}
+	var order []string
+	for _, c := range calls {
+		d.Calls++
+		d.In += c.In
+		d.Out += c.Out
+		if len(c.Anomalies) > 0 {
+			d.Flagged = append(d.Flagged, c)
+		}
+		for _, a := range c.Anomalies {
+			kinds[a.Kind]++
+		}
+		ss := bySession[c.Session]
+		if ss == nil {
+			ss = &index.Session{Key: c.Session, Agent: c.Agent, Principal: c.Principal, First: c.Time}
+			bySession[c.Session] = ss
+			order = append(order, c.Session)
+		}
+		ss.Calls++
+		ss.Tools += len(c.Tools)
+		ss.Flags += len(c.Anomalies)
+		ss.Last = c.Time
+	}
+	for _, k := range order {
+		d.Sessions = append(d.Sessions, *bySession[k])
+	}
+	for k, n := range kinds {
+		d.Kinds = append(d.Kinds, kindCount{k, n})
+	}
+	slices.SortFunc(d.Kinds, func(a, b kindCount) int {
+		if a.Count != b.Count {
+			return b.Count - a.Count
+		}
+		return strings.Compare(a.Kind, b.Kind)
+	})
+	s.render(w, http.StatusOK, "report", "Report: "+d.Scope, d)
+}
+
+func describeRange(from, to string) string {
+	switch {
+	case from != "" && to != "":
+		return "from " + from + " to " + to
+	case from != "":
+		return "from " + from
+	}
+	return "up to " + to
 }

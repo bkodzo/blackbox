@@ -133,3 +133,17 @@ summary { cursor: pointer; color: var(--muted); }
 .meter rect { fill: var(--link); }
 .meter rect.risk-high { fill: var(--bad); }
 .meter rect.risk-medium { fill: var(--warn); }
+.report h3 { font-size: 15px; margin: 14px 0 4px; }
+.report .verdict { margin: 8px 0; }
+@media print {
+  :root { --bg: #fff; --fg: #000; --muted: #444; --line: #bbb; --panel: #fff; --link: #000;
+          --ok: #000; --ok-bg: #fff; --warn: #000; --warn-bg: #fff; --bad: #000; --bad-bg: #fff; }
+  body { font-size: 11pt; }
+  header, footer, .live, .noprint, .filters, details { display: none; }
+  main { max-width: none; padding: 0; }
+  a { text-decoration: none; }
+  .verdict, .anomaly { border: 1px solid #000; }
+  tr, li, .anomaly, .flagged-call { break-inside: avoid; }
+  h2 { break-after: avoid; }
+  pre.body { max-height: none; overflow: visible; }
+}
