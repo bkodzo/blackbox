@@ -100,6 +100,10 @@ func TestSummariesAndSessions(t *testing.T) {
 	if len(flagged) != 1 || flagged[0].Seq != 3 || flagged[0].Anomalies[0].Kind != record.AnomalyOrphanToolResult {
 		t.Fatalf("flagged: %+v", flagged)
 	}
+	st := x.Stats(f.t0.Add(3 * time.Minute))
+	if st.Entries != 6 || st.Calls != 5 || st.Sessions != 4 || st.Flagged != 1 || st.CallsSince != 3 || st.FlaggedSince != 0 || !st.Last.Equal(f.t0.Add(5*time.Minute)) {
+		t.Fatalf("stats %+v", st)
+	}
 	if start, _ := x.Entry(1); start.Type != record.TypeGatewayStart || start.Instance != "i1" {
 		t.Fatalf("first entry %+v", start)
 	}

@@ -67,7 +67,7 @@ type Session struct {
 }
 
 // Name is how the session is shown.
-func (s *Session) Name() string {
+func (s Session) Name() string {
 	switch {
 	case s.ID != "":
 		return s.ID
@@ -259,6 +259,45 @@ func (x *Index) Len() int {
 	return len(x.entries)
 }
 
+// Stats are totals over the log.
+type Stats struct {
+	Entries      int
+	Calls        int
+	Sessions     int
+	Flagged      int // calls with at least one anomaly
+	CallsSince   int // calls received at or after the time given to Stats
+	FlaggedSince int
+	Last         time.Time // when the newest call was received
+}
+
+// Stats counts calls in the whole log and since the given time.
+func (x *Index) Stats(since time.Time) Stats {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	st := Stats{Entries: len(x.entries), Sessions: len(x.sessions)}
+	for i := range x.entries {
+		e := &x.entries[i]
+		if e.Type != record.TypeLLMCall {
+			continue
+		}
+		flagged := len(e.Anomalies) > 0
+		st.Calls++
+		if flagged {
+			st.Flagged++
+		}
+		if !e.Time.Before(since) {
+			st.CallsSince++
+			if flagged {
+				st.FlaggedSince++
+			}
+		}
+		if e.Time.After(st.Last) {
+			st.Last = e.Time
+		}
+	}
+	return st
+}
+
 // Entries returns the entries for which keep returns true, newest first, at
 // most limit of them (0 for no limit).
 func (x *Index) Entries(keep func(*Entry) bool, limit int) []Entry {
@@ -330,19 +369,28 @@ func (x *Index) Session(key string) (Session, []Entry, bool) {
 	return c, calls, true
 }
 
+// ReadLine returns the line of e exactly as stored, without its newline.
+func (x *Index) ReadLine(e Entry) ([]byte, error) {
+	f, err := os.Open(x.path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b := make([]byte, e.Len)
+	if _, err := f.ReadAt(b, e.Off); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
 // Read returns the full entry with the given seq, read from the file.
 func (x *Index) Read(seq uint64) (ledger.Entry, error) {
 	e, ok := x.Entry(seq)
 	if !ok {
 		return ledger.Entry{}, fmt.Errorf("no entry %d", seq)
 	}
-	f, err := os.Open(x.path)
+	b, err := x.ReadLine(e)
 	if err != nil {
-		return ledger.Entry{}, err
-	}
-	defer f.Close()
-	b := make([]byte, e.Len)
-	if _, err := f.ReadAt(b, e.Off); err != nil {
 		return ledger.Entry{}, err
 	}
 	le, err := ledger.ParseEntry(b)
