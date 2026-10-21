@@ -1,15 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/bkodzo/blackbox/internal/audit"
 	"github.com/bkodzo/blackbox/internal/ledger"
-	"github.com/bkodzo/blackbox/internal/record"
 )
 
 // Exit codes for verify. Each outcome has its own code so scripts and CI
@@ -49,134 +48,40 @@ func runVerify(args []string) int {
 		return failCode(exitError, "no checkpoint file at %s; pass --checkpoints with its location, or --no-checkpoints to verify without one", *cpPath)
 	}
 	if *noCPs {
-		*cpPath = os.DevNull
+		*cpPath = ""
 	}
-	cps, cpTorn, err := ledger.ReadCheckpoints(*cpPath)
-	var cpErr *ledger.VerifyError
-	if errors.As(err, &cpErr) {
-		// A checkpoint line that does not parse was altered: that is a verdict,
-		// not an I/O problem.
-		fmt.Printf("Checkpoints:  %s\n\nResult: TAMPERED\n  %s\n", *cpPath, cpErr.Error())
+	rep, err := audit.Check(*logPath, *cpPath, pub)
+	if err != nil {
+		return failCode(exitError, "%v", err)
+	}
+	if rep.CheckpointsBad {
+		// The checkpoint file was altered, so the log was not read.
+		fmt.Printf("Checkpoints:  %s\n\nResult: TAMPERED\n  %s\n", *cpPath, rep.Problem)
 		return exitTampered
 	}
-	if err != nil {
-		return failCode(exitError, "%v", err)
-	}
-	f, err := os.Open(*logPath)
-	if err != nil {
-		return failCode(exitError, "%v", err)
-	}
-	defer f.Close()
 
-	var (
-		warnings []string
-		calls    int
-		running  bool   // a gateway_start has no matching gateway_stop yet
-		lastType string // type of the last entry
-	)
-	res, err := ledger.Verify(f, pub, cps, func(e ledger.Entry) {
-		var h struct {
-			Type string `json:"type"`
-		}
-		json.Unmarshal(e.Rec, &h)
-		lastType = h.Type
-		switch h.Type {
-		case record.TypeGatewayStart:
-			if running {
-				warnings = append(warnings, fmt.Sprintf(
-					"seq %d: gateway started again without a clean shutdown before it; calls in flight at the time may be missing", e.Seq))
-			}
-			running = true
-			var s record.GatewayStart
-			json.Unmarshal(e.Rec, &s)
-			if s.QuarantinedBytes > 0 {
-				warnings = append(warnings, fmt.Sprintf(
-					"seq %d: at startup the gateway moved %d bytes of an incomplete line to %s (sha256 %s)",
-					e.Seq, s.QuarantinedBytes, s.QuarantineFile, s.QuarantineSHA256))
-			}
-			if s.CheckpointTornBytes > 0 {
-				warnings = append(warnings, fmt.Sprintf(
-					"seq %d: at startup the gateway removed %d bytes of an incomplete checkpoint line", e.Seq, s.CheckpointTornBytes))
-			}
-			if s.CheckpointsMissing {
-				warnings = append(warnings, fmt.Sprintf(
-					"seq %d: at startup the checkpoint file was missing and was created empty", e.Seq))
-			}
-			if s.CheckpointsEmpty {
-				warnings = append(warnings, fmt.Sprintf(
-					"seq %d: at startup the checkpoint file had no checkpoints although the log had entries "+
-						"(it was emptied, or the run before stopped before writing its first one)", e.Seq))
-			}
-			if s.RepairedSeq > 0 {
-				warnings = append(warnings, fmt.Sprintf(
-					"seq %d: at startup entry %d was missing its final newline; the gateway added it", e.Seq, s.RepairedSeq))
-			}
-		case record.TypeGatewayStop:
-			running = false
-		case record.TypeLLMCall:
-			calls++
-		}
-	})
-
+	res := rep.Result
 	fmt.Printf("Log:          %s\n", *logPath)
-	fmt.Printf("Signing key:  %s\n", ledger.Fingerprint(pub))
-	fmt.Printf("Entries:      %d checked (%d model calls)\n", res.Entries, calls)
+	fmt.Printf("Signing key:  %s\n", rep.Key)
+	fmt.Printf("Entries:      %d checked (%d model calls)\n", res.Entries, rep.Calls)
 	fmt.Printf("Checkpoints:  %d of %d matched\n", res.Checkpoints, res.CheckpointsTotal)
 
-	var ve *ledger.VerifyError
-	if errors.As(err, &ve) {
-		fmt.Printf("\nResult: TAMPERED\n  %s\n", ve.Error())
+	if rep.Verdict == audit.Tampered {
+		fmt.Printf("\nResult: TAMPERED\n  %s\n", rep.Problem)
 		if res.Entries > 0 {
 			fmt.Printf("  Entries 1 to %d were checked and are intact.\n", res.Entries)
 		}
 		return exitTampered
 	}
-	if err != nil {
-		return failCode(exitError, "%v", err)
-	}
-	// A clean shutdown writes a final checkpoint after gateway_stop, so a log
-	// that ends in one with no checkpoint covering it is worth a look. It is
-	// not proof of tampering: a crash between the two writes, or a checkpoint
-	// copy that is behind (such as one collected from stdout), looks the same.
-	// An attacker who cut the log back to an earlier run's end would keep
-	// that run's checkpoint, and only a copy kept elsewhere reveals that.
-	if lastType == record.TypeGatewayStop && !*noCPs && len(cps) > 0 {
-		var covered uint64
-		for _, c := range cps {
-			covered = max(covered, c.Seq)
-		}
-		if covered < res.Entries {
-			warnings = append(warnings, fmt.Sprintf(
-				"the log ends with a clean shutdown (entry %d), but the newest checkpoint here covers entry %d; "+
-					"the gateway stopped while writing its final checkpoint, this copy of the checkpoints is behind, "+
-					"or checkpoints were removed. Compare with the copy kept elsewhere", res.Entries, covered))
-		}
-	}
-
-	if res.TornBytes > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"the log ends in an incomplete line of %d bytes (an interrupted write); the gateway moves it to a quarantine file on next start",
-			res.TornBytes))
-	}
-	if res.Unterminated {
-		warnings = append(warnings, fmt.Sprintf(
-			"entry %d is valid but missing its final newline; the gateway adds it on next start", res.Entries))
-	}
-	if cpTorn > 0 {
-		warnings = append(warnings, "the checkpoint file ends in an incomplete line (an interrupted write); it was ignored")
-	}
-	if len(cps) == 0 {
-		warnings = append(warnings, "no checkpoints found, so entries removed from the end of the log cannot be detected")
-	}
 	fmt.Printf("\nResult: INTACT\n  Every entry is unchanged, in order, and signed by this key.\n  Head: %s\n", res.Head)
-	if running {
+	if rep.Running {
 		fmt.Println("  The last gateway run has not shut down (it may still be running).")
 	}
-	if len(warnings) == 0 {
+	if rep.Verdict == audit.Intact {
 		return exitIntact
 	}
 	fmt.Println("\nWarnings:")
-	for _, w := range warnings {
+	for _, w := range rep.Warnings {
 		fmt.Printf("  - %s\n", w)
 	}
 	return exitWarnings
