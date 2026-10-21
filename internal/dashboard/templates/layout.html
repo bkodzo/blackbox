@@ -1,0 +1,37 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - blackbox</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body data-entries="{{.Entries}}">
+<header>
+  <a class="brand" href="/">blackbox</a>
+  <nav>
+    <a href="/"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a>
+    <a href="/sessions"{{if or (eq .Nav "sessions") (eq .Nav "session")}} aria-current="page"{{end}}>Sessions</a>
+    <a href="/flags"{{if eq .Nav "flags"}} aria-current="page"{{end}}>Flags</a>
+    <a href="/integrity"{{if eq .Nav "integrity"}} aria-current="page"{{end}}>Integrity</a>
+  </nav>
+  {{with .Integrity}}
+  <a class="status {{if .Report}}{{verdictClass .Report.Verdict}}{{else if .Err}}bad{{end}}" href="/integrity">
+    {{if .Report}}Log {{.Report.Verdict}}{{if .NewSince}}, {{plural .NewSince "entry" "entries"}} since{{end}}
+    {{else if .Err}}Log could not be checked
+    {{else}}Checking the log{{end}}
+  </a>
+  {{end}}
+</header>
+<p class="live" id="live" hidden><span id="live-count"></span> <a href="">Reload</a></p>
+{{if .Shrunk}}<p class="banner bad">The log became shorter while the dashboard was reading it: entries were removed from its end. Check its integrity against a copy of the checkpoints kept elsewhere.</p>{{end}}
+{{if .IndexErr}}<p class="banner bad">The dashboard stopped reading the log: {{.IndexErr}}. Entries after that point are not shown.</p>{{end}}
+<main>
+{{template "content" .}}
+</main>
+<footer>
+  A read-only view of {{.Log}}. Lists read the log without checking it; the Integrity page says whether it can be trusted.
+</footer>
+</body>
+</html>{{end}}

@@ -1,0 +1,56 @@
+{{define "content"}}
+<h1>Integrity</h1>
+{{with .Integrity}}
+  {{if .Report}}{{with .Report}}
+  <section class="verdict {{verdictClass .Verdict}}">
+    {{if eq (verdictClass .Verdict) "bad"}}
+      <h2>The log was tampered with</h2>
+      <p>{{.Problem}}</p>
+      {{if .Result.Entries}}<p>Entries 1 to {{.Result.Entries}} were checked and are intact.</p>{{end}}
+    {{else}}
+      <h2>The log is intact{{if eq (verdictClass .Verdict) "warn"}}, with warnings{{end}}</h2>
+      <p>Every entry is unchanged, in order, and signed by this key.</p>
+      {{if .Running}}<p>The last gateway run has not shut down; it may still be running.</p>{{end}}
+    {{end}}
+  </section>
+  {{if .Warnings}}
+  <h2>Warnings</h2>
+  <ul class="warnings">{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>
+  {{end}}
+  <dl class="facts">
+    <dt>Checked</dt><dd>{{ts .CheckedAt}}</dd>
+    <dt>Log</dt><dd>{{.Log}}</dd>
+    <dt>Checkpoints</dt><dd>{{if .Checkpoints}}{{.Checkpoints}}, {{.Result.Checkpoints}} of {{.Result.CheckpointsTotal}} matched{{else}}none given, so entries removed from the end cannot be detected{{end}}</dd>
+    <dt>Key</dt><dd><code>{{.Key}}</code></dd>
+    <dt>Entries</dt><dd>{{.Result.Entries}}, of which {{.Calls}} model calls</dd>
+    {{if .Result.Head}}<dt>Head</dt><dd><code class="wrap">{{.Result.Head}}</code></dd>{{end}}
+  </dl>
+  {{end}}
+  {{if .NewSince}}<p class="note">{{plural .NewSince "entry was" "entries were"}} added since this check started.</p>{{end}}
+  {{else if .Err}}
+  <section class="verdict bad"><h2>The log could not be checked</h2><p>{{.Err}}</p></section>
+  {{else}}
+  <section class="verdict"><h2>Checking the log</h2><p>This takes a moment for a large log.</p></section>
+  {{end}}
+  <form method="post" action="/verify">
+    <button type="submit"{{if .Checking}} disabled{{end}}>{{if .Checking}}Checking...{{else}}Check again now{{end}}</button>
+  </form>
+{{end}}
+<p class="note">The check uses the same code as <code>blackbox verify</code>. It proves the log matches the checkpoints given here. Someone who controls the gateway host can cut the log and this checkpoint file together, so also check against a copy of the checkpoints kept on another machine.</p>
+
+{{with .Data}}
+<h2>Checkpoints</h2>
+{{if .CheckpointErr}}<p class="banner bad">{{.CheckpointErr}}</p>{{end}}
+{{if .CheckpointList}}
+<p class="count">{{plural .CheckpointCount "checkpoint" "checkpoints"}}{{if gt .CheckpointCount (len .CheckpointList)}}, showing the {{len .CheckpointList}} newest{{end}}.</p>
+<table>
+  <thead><tr><th>Entry</th><th>Written</th><th>Hash</th><th>Key</th></tr></thead>
+  <tbody>
+  {{range .CheckpointList}}<tr><td><a href="/call/{{.Seq}}">#{{.Seq}}</a></td><td>{{stamp .Time}}</td><td><code>{{clip .Hash 19}}</code></td><td><code>{{.Kid}}</code></td></tr>{{end}}
+  </tbody>
+</table>
+{{else if .Checkpoints}}
+<p class="empty">The checkpoint file has no checkpoints.</p>
+{{end}}
+{{end}}
+{{end}}

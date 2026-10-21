@@ -1,0 +1,51 @@
+{{define "content"}}{{with .Data}}
+<h1>Overview</h1>
+<section class="cards">
+  <div class="card"><span class="n">{{.Stats.Calls}}</span> model calls<small>{{.Stats.CallsSince}} in the last 24 hours</small></div>
+  <div class="card"><span class="n">{{.Stats.Sessions}}</span> sessions<small>last call {{ts .Stats.Last}}</small></div>
+  <div class="card{{if .Stats.Flagged}} attention{{end}}"><span class="n">{{.Stats.Flagged}}</span> flagged calls<small>{{.Stats.FlaggedSince}} in the last 24 hours</small></div>
+</section>
+
+<h2>Needs attention</h2>
+{{if .Attention}}
+<table>
+  <thead><tr><th>Entry</th><th>Time</th><th>Session</th><th>Agent</th><th>Flags</th></tr></thead>
+  <tbody>
+  {{range .Attention}}
+  <tr>
+    <td><a href="/call/{{.Seq}}">#{{.Seq}}</a></td>
+    <td>{{ts .Time}}</td>
+    <td><a href="/session?key={{.Session}}">{{sessionName .Session}}</a></td>
+    <td>{{orDash .Agent}}</td>
+    <td>{{range kinds .Anomalies}}<span class="tag{{if (flag .).Serious}} serious{{end}}">{{(flag .).Title}}</span> {{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+<p><a href="/flags">All flags</a></p>
+{{else}}
+<p class="empty">Nothing has been flagged.</p>
+{{end}}
+
+<h2>Latest calls</h2>
+{{if .Recent}}
+<table>
+  <thead><tr><th>Entry</th><th>Time</th><th>Session</th><th>Agent</th><th>Model</th><th>Tools</th><th>Status</th></tr></thead>
+  <tbody>
+  {{range .Recent}}
+  <tr>
+    <td><a href="/call/{{.Seq}}">#{{.Seq}}</a></td>
+    <td>{{ts .Time}}</td>
+    <td><a href="/session?key={{.Session}}">{{sessionName .Session}}</a></td>
+    <td>{{orDash .Agent}}</td>
+    <td>{{orDash .Model}}</td>
+    <td>{{range .Tools}}<span class="tool risk-{{orDash .Risk}}">{{.Name}}{{if .InText}}*{{end}}</span> {{end}}</td>
+    <td>{{if .ErrorClass}}<span class="tag">{{errorTitle .ErrorClass}}</span>{{else}}{{.Status}}{{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">No model calls recorded yet.</p>
+{{end}}
+{{end}}{{end}}

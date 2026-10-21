@@ -19,6 +19,7 @@ Usage:
   blackbox verify   [--log FILE] [--pub FILE]       check the log has not been altered
   blackbox sessions [--log FILE]                    list recorded agent sessions
   blackbox show     [--log FILE] SESSION            show what happened in a session
+  blackbox dashboard [--log FILE] [--pub FILE]      browse the log in a web browser
   blackbox version                                  print the version
 
 Run "blackbox COMMAND -h" for the flags of a command.
@@ -42,6 +43,8 @@ func main() {
 		code = runSessions(args)
 	case "show":
 		code = runShow(args)
+	case "dashboard":
+		code = runDashboard(args)
 	case "version", "--version":
 		fmt.Println("blackbox", version)
 	case "help", "-h", "--help":

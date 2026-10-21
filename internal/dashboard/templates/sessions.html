@@ -1,0 +1,31 @@
+{{define "content"}}{{with .Data}}
+<h1>Sessions</h1>
+<form class="filters" method="get" action="/sessions">
+  <label>Search <input type="search" name="q" value="{{.Q}}" placeholder="session, agent, or principal"></label>
+  <label class="check"><input type="checkbox" name="flagged" value="1"{{if .Flagged}} checked{{end}}> Only sessions with flags</label>
+  <button type="submit">Show</button>
+</form>
+{{if .Rows}}
+<p class="count">{{plural .Total "session" "sessions"}}{{if gt .Total .Limit}}, showing the {{.Limit}} most recent{{end}}.</p>
+<table>
+  <thead><tr><th>Session</th><th>Agent</th><th>On behalf of</th><th>Calls</th><th>Tool calls</th><th>Flags</th><th>Tokens in / out</th><th>Started</th><th>Last activity</th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+  <tr{{if .Flags}} class="flagged"{{end}}>
+    <td><a href="/session?key={{.Key}}">{{.Name}}</a></td>
+    <td>{{orDash .Agent}}</td>
+    <td>{{orDash .Principal}}</td>
+    <td>{{.Calls}}</td>
+    <td>{{.Tools}}</td>
+    <td>{{if .Flags}}<span class="tag serious">{{.Flags}}</span>{{else}}0{{end}}</td>
+    <td>{{.In}} / {{.Out}}</td>
+    <td>{{ts .First}}</td>
+    <td>{{ts .Last}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">{{if or .Q .Flagged}}No sessions match.{{else}}No sessions recorded yet.{{end}}</p>
+{{end}}
+{{end}}{{end}}

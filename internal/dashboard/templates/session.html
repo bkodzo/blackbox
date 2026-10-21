@@ -1,0 +1,38 @@
+{{define "content"}}{{with .Data}}
+<h1>{{.Session.Name}}</h1>
+<dl class="facts">
+  <dt>Agent</dt><dd>{{orDash .Session.Agent}}</dd>
+  <dt>On behalf of</dt><dd>{{orDash .Session.Principal}}</dd>
+  <dt>Calls</dt><dd>{{.Session.Calls}}, with {{plural .Session.Tools "tool call" "tool calls"}}</dd>
+  <dt>Flags</dt><dd>{{.Session.Flags}}</dd>
+  <dt>Tokens</dt><dd>{{.Session.In}} in, {{.Session.Out}} out</dd>
+  <dt>Time</dt><dd>{{ts .Session.First}} to {{ts .Session.Last}} ({{span .Session.First .Session.Last}})</dd>
+</dl>
+{{if not .Session.ID}}<p class="note">This agent sent no session ID, so its calls are grouped by the conversation they continue.</p>{{end}}
+
+<h2>What happened</h2>
+<ol class="timeline">
+{{range .Calls}}
+  <li{{if .Anomalies}} class="flagged"{{end}}>
+    <div class="head">
+      <a href="/call/{{.Seq}}">#{{.Seq}}</a>
+      <span>{{clock .Time}}</span>
+      {{if .Turn}}<span>turn {{.Turn}}</span>{{end}}
+      <span>{{orDash .Model}}</span>
+      <span>{{.In}} in / {{.Out}} out tokens</span>
+      {{if .ErrorClass}}<span class="tag">{{errorTitle .ErrorClass}}</span>{{else}}<span>status {{.Status}}</span>{{end}}
+    </div>
+    {{if .Tools}}
+    <ul class="tools">
+      {{range .Tools}}<li>The model {{if .InText}}wrote a call to{{else}}asked to use{{end}} <span class="tool risk-{{orDash .Risk}}">{{.Name}}</span>{{if .Risk}} (risk: {{.Risk}}){{end}}{{if .InText}}, in its reply text rather than as a tool call{{end}}.</li>{{end}}
+    </ul>
+    {{end}}
+    {{range .Anomalies}}
+    <p class="anomaly{{if (flag .Kind).Serious}} serious{{end}}"><strong>{{(flag .Kind).Title}}.</strong> {{.Detail}}</p>
+    {{end}}
+  </li>
+{{else}}
+  <li>No calls.</li>
+{{end}}
+</ol>
+{{end}}{{end}}

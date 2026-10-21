@@ -1,0 +1,77 @@
+{{define "content"}}{{with .Data}}
+<h1>Entry {{.Entry.Seq}}{{if .Call}}: model call{{else}}: {{orDash .Summary.Type}}{{end}}</h1>
+<p class="nav-links">
+  {{if gt .Entry.Seq 1}}<a href="/call/{{.Entry.Seq | prev}}">Previous entry</a>{{end}}
+  <a href="/call/{{.Entry.Seq | next}}">Next entry</a>
+  <a href="/call/{{.Entry.Seq}}/raw">Download the entry as stored</a>
+</p>
+{{with .Call}}
+<dl class="facts">
+  <dt>Session</dt><dd><a href="/session?key={{$.Data.Summary.Session}}">{{sessionName $.Data.Summary.Session}}</a>{{if .Turn}}, turn {{.Turn}}{{end}}</dd>
+  <dt>Agent</dt><dd>{{orDash .Agent.ID}}{{if .Agent.Version}} {{.Agent.Version}}{{end}} ({{.Identity}})</dd>
+  <dt>On behalf of</dt><dd>{{orDash .Principal}}</dd>
+  <dt>Client</dt><dd>{{.Client.IP}}{{if .Client.UserAgent}}, {{.Client.UserAgent}}{{end}}</dd>
+  <dt>Request</dt><dd>{{.Request.Method}} {{.Request.Path}}, model {{orDash .Request.ModelRequested}}</dd>
+  <dt>Answered by</dt><dd>{{orDash .Upstream.ModelServed}} at {{.Upstream.URL}}</dd>
+  <dt>Result</dt><dd>status {{.Response.Status}}{{if .Response.FinishReason}}, finished with {{.Response.FinishReason}}{{end}}{{with .Error}}; <span class="tag">{{errorTitle .Class}}</span> {{.Message}}{{end}}</dd>
+  <dt>Tokens</dt><dd>{{.Response.Usage.Input}} in, {{.Response.Usage.Output}} out</dd>
+  <dt>Time</dt><dd>received {{ts .Timing.ReceivedAt}}, completed after {{span .Timing.ReceivedAt .Timing.CompletedAt}}</dd>
+  <dt>Trace</dt><dd><code>{{.Trace.TraceID}}</code> span <code>{{.Trace.SpanID}}</code></dd>
+</dl>
+
+{{if .Anomalies}}
+<h2>Flags</h2>
+{{range .Anomalies}}<p class="anomaly{{if (flag .Kind).Serious}} serious{{end}}"><strong>{{(flag .Kind).Title}}.</strong> {{.Detail}}</p>{{end}}
+{{end}}
+
+{{if .Response.ToolCalls}}
+<h2>Tool calls the model made</h2>
+<table>
+  <thead><tr><th>Tool</th><th>Arguments</th><th>Risk</th><th>How</th></tr></thead>
+  <tbody>
+  {{range .Response.ToolCalls}}
+  <tr>
+    <td><span class="tool risk-{{orDash .Risk}}">{{.Name}}</span></td>
+    <td><code class="wrap">{{.Arguments}}</code>{{if not .ValidJSON}} <span class="tag">not valid JSON</span>{{end}}</td>
+    <td>{{orDash .Risk}}{{if .Category}}, {{.Category}}{{end}}</td>
+    <td>{{if .InText}}written in the reply text{{else}}tool call{{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{if .ToolResultsIn}}
+<h2>Tool results the agent sent back</h2>
+<ul>
+{{range .ToolResultsIn}}<li><code>{{.ToolCallID}}</code>{{if .MatchedSeq}}, answering a call made in <a href="/call/{{.MatchedSeq}}">#{{.MatchedSeq}}</a>{{else}}, matching no call the model made{{end}}</li>{{end}}
+</ul>
+{{end}}
+
+{{with .Response.Reasoning}}
+<h2>Model reasoning</h2>
+{{if .Preview}}<pre class="body">{{.Preview}}</pre><p class="note">The first part of {{.Chars}} characters; the full text is in the response body below.</p>{{end}}
+{{if .RedactedBlocks}}<p class="note">{{plural .RedactedBlocks "block was" "blocks were"}} returned only in encrypted form.</p>{{end}}
+{{end}}
+
+<h2>Request body</h2>
+{{template "body" $.Data.Req}}
+<h2>Response body</h2>
+{{template "body" $.Data.Resp}}
+{{else}}
+<pre class="body">{{.Record}}</pre>
+{{end}}
+
+<h2>Seal</h2>
+<dl class="facts">
+  <dt>Hash</dt><dd><code class="wrap">{{.Entry.Hash}}</code></dd>
+  <dt>Previous</dt><dd><code class="wrap">{{.Entry.Prev}}</code></dd>
+  <dt>Signed by key</dt><dd><code>{{.Entry.Kid}}</code></dd>
+</dl>
+<p class="note">These are shown as stored. Whether they are valid is decided on the <a href="/integrity">Integrity</a> page.</p>
+{{end}}{{end}}
+
+{{define "body"}}
+<p class="note">{{.Bytes}} bytes, {{.Encoding}}, sha256 <code class="wrap">{{.SHA256}}</code>{{if .Truncated}}. The gateway stored only the start of this body; the hash covers all of it{{end}}{{if .Clipped}}. Only the start is shown here; download the entry for the rest{{end}}.</p>
+{{if .Text}}<pre class="body">{{.Text}}</pre>{{else}}<p class="empty">Empty.</p>{{end}}
+{{end}}
