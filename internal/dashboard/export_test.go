@@ -11,7 +11,7 @@ import (
 func TestExportIsSelfContained(t *testing.T) {
 	f := newFixture(t)
 	dir := t.TempDir()
-	n, err := f.srv.Export(dir)
+	n, err := f.srv.Export(dir, "Scripted <b>sample</b>.")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestExportIsSelfContained(t *testing.T) {
 				t.Fatalf("%s contains %q", filepath.Base(p), raw)
 			}
 		}
-		if !strings.Contains(page, "Content-Security-Policy") || !strings.Contains(page, "A static snapshot of") {
+		if !strings.Contains(page, "Content-Security-Policy") || !strings.Contains(page, "A static snapshot of") || !strings.Contains(page, "Scripted &lt;b&gt;sample&lt;/b&gt;.") {
 			t.Fatalf("%s lacks the snapshot policy or notice", filepath.Base(p))
 		}
 		for _, m := range link.FindAllStringSubmatch(page, -1) {

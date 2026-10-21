@@ -26,7 +26,7 @@
   </a>
   {{end}}
 </header>
-{{if .Static}}<p class="live">A static snapshot of {{.Log}}, made {{ts .Made}}. Searching, filtering, and checking again need the live dashboard.</p>
+{{if .Static}}<p class="live">A static snapshot of {{.Log}}, made {{ts .Made}}. Searching, filtering, and checking again need the live dashboard.{{with .Note}} {{.}}{{end}}</p>
 {{else}}<p class="live" id="live" hidden><span id="live-count"></span> <a href="">Reload</a></p>{{end}}
 {{if .Shrunk}}<p class="banner bad">The log became shorter while the dashboard was reading it: entries were removed from its end. Check its integrity against a copy of the checkpoints kept elsewhere.</p>{{end}}
 {{if .Replaced}}<p class="banner bad">The log file was replaced, or entries already read were rewritten, while the dashboard was reading it. It has been read again from the start. Check its integrity.</p>{{end}}

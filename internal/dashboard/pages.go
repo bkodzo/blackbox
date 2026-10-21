@@ -185,13 +185,14 @@ type page struct {
 	Replaced  bool
 	Static    bool      // an exported snapshot rather than the live dashboard
 	Made      time.Time // when the snapshot was made
+	Note      string    // shown at the top of every page of a snapshot
 	Data      any
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name, title string, data any) {
 	p := page{
 		Title: title, Nav: name, Log: s.cfg.Log, Entries: s.idx.Len(),
-		Integrity: s.integrity(), IndexErr: s.idx.Err(), Shrunk: s.idx.Shrunk(), Replaced: s.idx.Replaced(), Static: s.static, Made: s.made, Data: data,
+		Integrity: s.integrity(), IndexErr: s.idx.Err(), Shrunk: s.idx.Shrunk(), Replaced: s.idx.Replaced(), Static: s.static, Made: s.made, Note: s.note, Data: data,
 	}
 	var buf bytes.Buffer
 	if err := s.pages[name].ExecuteTemplate(&buf, "layout", p); err != nil {

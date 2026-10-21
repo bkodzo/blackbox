@@ -49,6 +49,7 @@ type Server struct {
 
 	static bool      // rendering an export: links point at files
 	made   time.Time // when the export was made
+	note   string    // shown at the top of every exported page
 
 	mu        sync.Mutex
 	report    *audit.Report // the latest completed check, or nil

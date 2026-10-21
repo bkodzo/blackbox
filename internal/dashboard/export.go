@@ -14,15 +14,16 @@ import (
 // Export writes every page of the dashboard to dir as static files, for
 // sharing a snapshot or publishing a demo. Pages link to each other by file
 // name, so the directory can be opened from disk or served under any path.
-// Each entry gets a page of its own, so it suits small logs. It returns the
-// number of files written.
-func (s *Server) Export(dir string) (int, error) {
+// Each entry gets a page of its own, so it suits small logs. note, if not
+// empty, is shown at the top of every page. It returns the number of files
+// written.
+func (s *Server) Export(dir, note string) (int, error) {
 	<-s.startCheck()
 	pages, err := parsePages(true)
 	if err != nil {
 		return 0, err
 	}
-	s.pages, s.static, s.made = pages, true, time.Now()
+	s.pages, s.static, s.made, s.note = pages, true, time.Now(), note
 	if err := os.MkdirAll(filepath.Join(dir, "static"), 0o755); err != nil {
 		return 0, err
 	}

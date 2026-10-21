@@ -38,6 +38,7 @@ func runDashboard(args []string) int {
 	noCPs := fs.Bool("no-checkpoints", false, "check without a checkpoint file (removals from the end cannot be detected)")
 	listen := fs.String("listen", "127.0.0.1:8090", "address to serve the dashboard on")
 	export := fs.String("export", "", "write every page to this directory as static files, then exit")
+	note := fs.String("export-note", "", "text shown at the top of every exported page")
 	var hosts hostList
 	fs.Var(&hosts, "allow-host", "host name or address the dashboard may be reached under, besides localhost (repeatable)")
 	fs.Parse(args)
@@ -59,7 +60,7 @@ func runDashboard(args []string) int {
 		return fail("%v", err)
 	}
 	if *export != "" {
-		n, err := s.Export(*export)
+		n, err := s.Export(*export, *note)
 		if err != nil {
 			return fail("%v", err)
 		}
