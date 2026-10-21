@@ -101,6 +101,10 @@ checks is itself visible.
 
 ## Not covered
 
+- **Dashboard access.** The dashboard has no login. It is read-only, listens
+  on localhost by default, and refuses requests addressed to other host
+  names, but anyone who can reach it can read every prompt and response in
+  the log. Put it behind access control you already trust before sharing it.
 - **A compromised gateway host.** An attacker with root on the gateway can read
   the key and write false entries going forward. blackbox protects records
   already written and checkpointed elsewhere, not the future output of a

@@ -41,6 +41,9 @@ Example file:
 }
 ```
 
+Settings for `blackbox dashboard` are described in
+[DASHBOARD.md](DASHBOARD.md#settings).
+
 ## Agent headers
 
 Agents can describe themselves with optional headers. They are recorded and

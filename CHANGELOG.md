@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `blackbox dashboard`: a read-only web view of the log with overview,
+  sessions, flags, entry, and integrity pages. It follows the log as the
+  gateway writes it, reaches its integrity verdict with the same code as
+  `blackbox verify`, and needs only the log, checkpoints, and public key.
+
 ## v0.1.1
 
 - The checkpoint file is locked like the log, so two gateways can no longer

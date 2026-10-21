@@ -14,13 +14,13 @@ var version = "dev"
 const usage = `blackbox records what AI agents do in a tamper-evident log.
 
 Usage:
-  blackbox init     [--dir DIR]                     create the gateway's signing key
-  blackbox serve    --upstream URL [flags]          run the gateway
-  blackbox verify   [--log FILE] [--pub FILE]       check the log has not been altered
-  blackbox sessions [--log FILE]                    list recorded agent sessions
-  blackbox show     [--log FILE] SESSION            show what happened in a session
-  blackbox dashboard [--log FILE] [--pub FILE]      browse the log in a web browser
-  blackbox version                                  print the version
+  blackbox init      [--dir DIR]                create the gateway's signing key
+  blackbox serve     --upstream URL [flags]     run the gateway
+  blackbox verify    [--log FILE] [--pub FILE]  check the log has not been altered
+  blackbox sessions  [--log FILE]               list recorded agent sessions
+  blackbox show      [--log FILE] SESSION       show what happened in a session
+  blackbox dashboard [--log FILE] [--pub FILE]  browse the log in a web browser
+  blackbox version                              print the version
 
 Run "blackbox COMMAND -h" for the flags of a command.
 `

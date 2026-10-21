@@ -19,6 +19,11 @@
   file, so a second one pointed at either refuses to start. Gateways sharing a
   directory need their own `--checkpoints` as well as their own `--log`. A supervisor that restarts the
   gateway should wait for the old process to exit, or retry until it has.
+- **Keep the dashboard private.** `blackbox dashboard` has no login and shows
+  everything in the log. Leave it on localhost, or put it behind your own
+  access control and pass the name people use with `--allow-host`. It needs
+  only the log, checkpoints, and public key, so auditors can run it on their
+  own machine against a copy.
 - **Give auditors the public key separately.** Verification is only as good as
   the public key it is checked against.
 
