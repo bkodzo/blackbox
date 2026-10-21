@@ -7,6 +7,7 @@
   every page as static files.
 - A live demo of the dashboard on a scripted sample log and a tampered copy,
   published by the `demo` workflow.
+- The dashboard's index takes about 40 percent less memory per entry.
 
 ## v0.2.0
 
