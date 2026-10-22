@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0
 
 - Dashboard: activity charts and the most used tools on the overview, a
   printable report for a session or a date range, and `--export` to save
