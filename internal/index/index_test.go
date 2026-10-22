@@ -341,3 +341,31 @@ func TestActivityAndTopTools(t *testing.T) {
 		t.Fatalf("top tools %+v", top)
 	}
 }
+
+func TestStoredValuesRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	times := []time.Time{
+		{},
+		time.Unix(0, 0).UTC(),
+		time.Date(1500, 3, 1, 12, 0, 0, 0, time.UTC),
+		time.Date(2600, 1, 2, 3, 4, 5, 6, time.UTC),
+		time.Date(2026, 10, 22, 9, 30, 0, 123456789, time.FixedZone("x", 19800)),
+	}
+	for i, tm := range times {
+		c := record.LLMCall{Type: record.TypeLLMCall, Turn: 1 << 40}
+		c.Response.Status = 1 << 33
+		c.Response.Usage = record.Usage{Input: 3_000_000_000, Output: 5_000_000_000 + i}
+		c.Timing.ReceivedAt = tm
+		f.append(t, c)
+	}
+	x, _ := Open(f.path)
+	for i, tm := range times {
+		e, _ := x.Entry(uint64(i + 1))
+		if !e.Time.Equal(tm) || e.Time.IsZero() != tm.IsZero() {
+			t.Errorf("time %v read back as %v", tm, e.Time)
+		}
+		if e.In != 3_000_000_000 || e.Out != 5_000_000_000+i || e.Turn != 1<<40 || e.Status != 1<<33 {
+			t.Errorf("entry %d read back as in %d, out %d, turn %d, status %d", i+1, e.In, e.Out, e.Turn, e.Status)
+		}
+	}
+}

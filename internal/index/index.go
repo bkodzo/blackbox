@@ -103,12 +103,13 @@ type Index struct {
 }
 
 // entry is how an Entry is stored: strings as places in Index.table and the
-// time as Unix nanoseconds, which takes about half the memory.
+// time as seconds and nanoseconds, which takes less memory.
 type entry struct {
 	seq, off                                                 int64
-	time                                                     int64 // 0 for no time
-	n, status, turn, in, out                                 int32
+	sec                                                      int64 // Unix seconds; any time.Time round-trips
+	nsec                                                     int32
 	typ, instance, session, agent, principal, model, errType uint32
+	n, status, turn, in, out                                 int64
 	tools                                                    []Tool
 	anomalies                                                []record.Anomaly
 }
@@ -142,25 +143,16 @@ func (x *Index) newTable() {
 }
 
 func (x *Index) pack(e Entry) entry {
-	var t int64
-	if !e.Time.IsZero() {
-		t = e.Time.UnixNano()
-	}
 	return entry{
-		seq: int64(e.Seq), off: e.Off, time: t,
-		n: int32(e.Len), status: int32(e.Status), turn: int32(e.Turn), in: int32(e.In), out: int32(e.Out),
+		seq: int64(e.Seq), off: e.Off, sec: e.Time.Unix(), nsec: int32(e.Time.Nanosecond()),
+		n: int64(e.Len), status: int64(e.Status), turn: int64(e.Turn), in: int64(e.In), out: int64(e.Out),
 		typ: x.ref(e.Type), instance: x.ref(e.Instance), session: x.ref(e.Session), agent: x.ref(e.Agent),
 		principal: x.ref(e.Principal), model: x.ref(e.Model), errType: x.ref(e.ErrorClass),
 		tools: e.Tools, anomalies: e.Anomalies,
 	}
 }
 
-func (e *entry) when() time.Time {
-	if e.time == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, e.time)
-}
+func (e *entry) when() time.Time { return time.Unix(e.sec, int64(e.nsec)) }
 
 // at returns the stored entry i as an Entry.
 func (x *Index) at(i int) Entry {
@@ -515,8 +507,9 @@ func (x *Index) Entries(keep func(*Entry) bool, limit int) ([]Entry, int) {
 	defer x.mu.RUnlock()
 	var out []Entry
 	total := 0
+	var e Entry // one variable, so keep's pointer does not allocate per entry
 	for i := len(x.stored) - 1; i >= 0; i-- {
-		if e := x.at(i); keep == nil || keep(&e) {
+		if e = x.at(i); keep == nil || keep(&e) {
 			total++
 			if limit == 0 || len(out) < limit {
 				out = append(out, e)

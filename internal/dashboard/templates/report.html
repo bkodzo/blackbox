@@ -34,7 +34,8 @@
 
 <h2>Summary</h2>
 <dl class="facts">
-  <dt>Model calls</dt><dd>{{.Calls}}{{if .Clipped}} (the first {{.Calls}} that matched; narrow the report to see the rest){{end}}</dd>
+  <dt>Model calls</dt><dd>{{.Calls}}{{if .Clipped}}, the {{.Calls}} most recent of those that matched; narrow the report to cover the rest{{end}}</dd>
+  {{if .Calls}}<dt>Covering</dt><dd>calls received from {{ts .First}} to {{ts .Last}}</dd>{{end}}
   <dt>Sessions</dt><dd>{{len .Sessions}}</dd>
   <dt>Flagged calls</dt><dd>{{len .Flagged}}</dd>
   <dt>Tokens</dt><dd>{{.In}} in, {{.Out}} out</dd>

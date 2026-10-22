@@ -262,3 +262,25 @@ func TestReportContents(t *testing.T) {
 		t.Fatalf("unknown session: status %d", code)
 	}
 }
+
+func TestClippedReportSaysWhatItCovers(t *testing.T) {
+	dir := t.TempDir()
+	pub, key, _ := ed25519.GenerateKey(nil)
+	logPath, cpPath := filepath.Join(dir, "log.jsonl"), filepath.Join(dir, "cp.jsonl")
+	l, _ := ledger.Open(logPath, key, ledger.Options{CheckpointPath: cpPath})
+	start := time.Date(2026, 10, 1, 9, 0, 0, 0, time.Local)
+	for i := range reportLimit + 10 {
+		c := record.LLMCall{Type: record.TypeLLMCall, Session: record.Session{ID: "s"}}
+		c.Timing.ReceivedAt = start.Add(time.Duration(i) * time.Minute)
+		b, _ := json.Marshal(c)
+		l.Append(b)
+	}
+	l.Close()
+	s, _ := New(Config{Log: logPath, Checkpoints: cpPath, Pub: pub})
+	f := &fixture{logPath: logPath, cpPath: cpPath, pub: pub, srv: s}
+	_, body := f.get(t, "/report?from=2026-10-01&to=2026-10-31")
+	if !strings.Contains(body, "the 2000 most recent of those that matched") ||
+		!strings.Contains(body, "calls received from "+start.Add(10*time.Minute).Format("2006-01-02 15:04:05")) {
+		t.Fatal("a clipped report does not say which calls it covers")
+	}
+}

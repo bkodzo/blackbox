@@ -9,15 +9,31 @@ import (
 )
 
 func TestExportIsSelfContained(t *testing.T) {
+	checkExport(t, newFixture(t), 5+2+6+1, "The log is intact")
+}
+
+func TestExportOfALogWithAGap(t *testing.T) {
+	// Entry 2 is missing, so entry 3 has no previous page to link to.
 	f := newFixture(t)
+	b, _ := os.ReadFile(f.logPath)
+	lines := strings.SplitAfter(string(b), "\n")
+	os.WriteFile(f.logPath, []byte(lines[0]+lines[2]), 0o600)
+	srv, err := New(Config{Log: f.logPath, Checkpoints: f.cpPath, Pub: f.pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv = srv
+	checkExport(t, f, 5+4+1, "The log was tampered with")
+}
+
+func checkExport(t *testing.T, f *fixture, files int, verdict string) {
+	t.Helper()
 	dir := t.TempDir()
 	n, err := f.srv.Export(dir, "Scripted <b>sample</b>.")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 5 pages, a session page and report, 3 entries with their raw files,
-	// and the stylesheet.
-	if n != 5+2+6+1 {
+	if n != files {
 		t.Fatalf("wrote %d files", n)
 	}
 	link := regexp.MustCompile(`(?:href|src|action)="([^"]*)"`)
@@ -43,7 +59,7 @@ func TestExportIsSelfContained(t *testing.T) {
 			}
 		}
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, "integrity.html")); !strings.Contains(string(b), "The log is intact") {
+	if b, _ := os.ReadFile(filepath.Join(dir, "integrity.html")); !strings.Contains(string(b), verdict) {
 		t.Fatal("the export does not carry the integrity result")
 	}
 }

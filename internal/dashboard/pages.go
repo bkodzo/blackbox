@@ -158,7 +158,7 @@ func links(static bool) template.FuncMap {
 // fileKey turns a session key into a safe, stable file name part.
 func fileKey(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:16])
 }
 
 func parsePages(static bool) (map[string]*template.Template, error) {
@@ -360,8 +360,10 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request) {
 		Resp    shownBody
 		Record  string // other entries, shown as indented JSON
 		HasNext bool
+		HasPrev bool
 	}{Entry: le, Summary: sum}
 	_, data.HasNext = s.idx.Entry(le.Seq + 1)
+	_, data.HasPrev = s.idx.Entry(le.Seq - 1)
 	if sum.Type == record.TypeLLMCall {
 		var c record.LLMCall
 		if err := json.Unmarshal(le.Rec, &c); err == nil {
@@ -455,7 +457,9 @@ type reportData struct {
 	Kinds     []kindCount
 	Flagged   []index.Entry
 	Timeline  []index.Entry // the session's calls, for a report on one session
-	Clipped   bool          // more calls matched than reportLimit
+	Clipped   bool          // more calls matched than reportLimit; the newest are kept
+	First     time.Time     // when the earliest call covered was received
+	Last      time.Time     // and the latest
 }
 
 func (s *Server) reportPage(w http.ResponseWriter, r *http.Request) {
@@ -500,7 +504,11 @@ func (s *Server) reportPage(w http.ResponseWriter, r *http.Request) {
 	kinds := map[string]int{}
 	bySession := map[string]*index.Session{}
 	var order []string
-	for _, c := range calls {
+	for i, c := range calls {
+		if i == 0 {
+			d.First = c.Time
+		}
+		d.Last = c.Time
 		d.Calls++
 		d.In += c.In
 		d.Out += c.Out
