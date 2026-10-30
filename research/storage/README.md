@@ -54,13 +54,38 @@ cannot remove the repetition: gzip only looks 32 KB back, and the repeated
 history is further away than that. The ratios stayed the same from 5 to 40
 people, so most of the saving comes from repetition within sessions.
 
+## Rebuilding exact bytes
+
+The gateway hashes the exact request bytes, so a deduplicated log must give
+them back exactly. [rebuild](rebuild/main.go) splits each request into a
+skeleton (everything except the messages and the tool list, kept verbatim,
+with 8-byte references in their place) and the messages and tool lists, kept
+once each in a store keyed by their exact bytes. It then rebuilds every
+request and compares it with the original.
+
+| Traffic | Requests rebuilt exactly | Skeleton, share of raw |
+|---|---|---|
+| Simulated organisation (above) | 2,372 of 2,372 | 0.36% (320 bytes per request) |
+| A Python agent using `json.dumps`, through the gateway, against replies recorded byte for byte from a local model server | 440 of 440 | 0.58% (133 bytes per request) |
+
+Exactness is nearly free: the skeletons are under 1% of the raw requests.
+
+The Python run also shows how real agents echo replies. None of 360 echoed
+replies had the bytes the server returned: agents parse the reply and write
+it again in their own format, and some build their own message from its
+fields. But once an agent has written a message, it resends it with the same
+bytes on every later turn, so the history still deduplicates. The cost of
+real agents is therefore one extra stored copy of each model reply, which is
+small because replies are a few percent of the bytes.
+
 ## What this does not show yet
 
 - **The corpus is simulated.** Session lengths, tool definition sizes, and
-  tool result sizes are assumptions. Real agent traffic is the next check.
-- **Rebuilding exact bytes.** The gateway hashes the exact request bytes, so
-  a deduplicated log must reproduce them exactly. The size of whatever must
-  be stored besides the messages (whitespace, key order, number formatting)
-  is not measured yet; this is the open question.
+  tool result sizes are assumptions. Traffic from real agents with real tasks
+  is still to be measured.
+- **Other agent frameworks.** Only a minimal standard-library Python agent
+  and blackbox's demo agent were tested. Frameworks that rebuild the whole
+  conversation from their own objects on every turn may change formatting
+  between turns, which would erode the saving.
 - **Costs.** Gateway CPU per call, verification time, and the time to open one
   call from an archive are not measured yet.
