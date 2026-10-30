@@ -303,7 +303,7 @@ func TestHugeExponentsStayShort(t *testing.T) {
 	out := CanonicalArgs(`[` + strings.Repeat(`1e1000000,`, 1000) + `1]`)
 	// Before the fix this was over 1 GB; the time limit is generous so slow
 	// or race-instrumented runners do not make the test flaky.
-	if len(out) > 20000 || time.Since(start) > 5*time.Second {
+	if len(out) > 20000 || time.Since(start) > 5*slowdown*time.Second {
 		t.Fatalf("canonicalizing 10 KB of exponents produced %d bytes in %v", len(out), time.Since(start))
 	}
 }
@@ -368,7 +368,7 @@ func TestHostileTextIsCheapAndFlagged(t *testing.T) {
 	_, partial := findTextToolCalls(strings.Repeat(`{"a":`, 13000)) // about 64 KB of unterminated nesting
 	// Unbounded, this took seconds per reply; the limit leaves room for slow
 	// or race-instrumented runners.
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
+	if elapsed := time.Since(start); elapsed > 3*slowdown*time.Second {
 		t.Fatalf("scan took %v", elapsed)
 	}
 	if !partial {
