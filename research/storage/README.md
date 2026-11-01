@@ -1,44 +1,53 @@
-# Storage research: making agent logs much smaller
+# Storage research: deduplicating agent audit logs
 
-## The problem in one paragraph
+## Problem
 
-An AI agent works in steps, and at every step it sends the model the whole
-conversation so far. Step 20 carries steps 1 to 19 again. blackbox saves
-every request exactly as sent, so it saves those repeats too, and the log
-grows very fast. For a company where a few hundred people use agents every
-day, that is roughly 2 TB a year.
+Agents call a model repeatedly within a task, and each request carries the
+full conversation so far: system prompt, tool definitions, every earlier
+message, and every tool result. blackbox records each request verbatim, so
+the log stores that shared history again on every call. Log size therefore
+grows with the square of task length, not with the amount of new content.
+For an organisation of a few hundred people using agents daily, this is on
+the order of 2 TB a year.
 
-**Question:** how much of the log is really new, and can we store it in a way
-that is much smaller but still lets us prove exactly what was sent?
+This study measures how much of an agent audit log is redundant, and whether
+it can be stored once without weakening the guarantee that every request can
+be reproduced byte for byte and verified against its signature.
 
-## Short answer
+## Summary of results
 
-About 95% of the log is repeated text. Storing each message once, and keeping
-a short note of which messages each request used, makes the log about 14
-times smaller, or about 50 times smaller with ordinary compression on top.
-Every request can still be rebuilt exactly, byte for byte, which is what the
-proof needs. The extra notes cost less than 1% of the original size.
+- About 95% of the log is content already present earlier in the log.
+- Storing each distinct message once, with a small per-request skeleton that
+  references the messages, reduces the log 14x; adding gzip gives 52x.
+  Compressing the log as it is today gives 3.6x.
+- Every request was reconstructed byte for byte from the stored pieces. The
+  skeletons add under 1% of the original size.
+- Real agents re-serialize model replies before sending them back, but resend
+  their own history unchanged, so deduplication still applies.
+- The added work is about 0.4 ms per request to split and hash, and 0.01 ms to
+  reconstruct.
 
-## How we tested it
+## Method
 
-Three small programs in this folder:
+The study uses three programs in this directory.
 
-- [corpus](corpus/main.go) **makes realistic company traffic.** It pretends
-  to be many people running many kinds of agent. Each agent has its own
-  instructions and list of tools, and each task is a conversation where the
-  whole history is sent again at every step. Tool results come from real
-  files: some are shared documents many people read, others are one-offs.
-  The traffic goes through blackbox's own recorder, so the log looks exactly
-  like a real one.
-- [anatomy](anatomy/main.go) **measures what is inside a log:** how much is
-  history sent again, how much is the agent's list of tools sent again, and
-  how much is new. It then compares ways of storing it.
-- [rebuild](rebuild/main.go) **checks nothing is lost.** It stores each
-  message once, keeps a small "skeleton" of each request (everything except
-  the messages, plus short references to them), rebuilds every request from
-  those pieces, and checks it is identical to the original.
-
-To run them:
+- [corpus](corpus/main.go) generates a log of simulated organisational
+  traffic. Simulated users run several agent types, each with its own system
+  prompt and tool definitions. Each task is a session in which the agent
+  resends the whole conversation on every call. Tool results are drawn from
+  real files, either from a pool of shared documents with a skewed popularity
+  distribution or as content unique to the call. Exchanges pass through
+  blackbox's recorder, so the log has the gateway's exact format.
+- [anatomy](anatomy/main.go) attributes every byte of a log to a category
+  (gateway metadata, escaping, tool definitions, resent history, content new
+  to the session, responses) and compares storage schemes: per-entry gzip,
+  whole-log gzip, and storing each distinct message once.
+- [rebuild](rebuild/main.go) tests lossless reconstruction. Each request is
+  split into a skeleton (all bytes except the messages and tool list, kept
+  verbatim, with 8-byte references in their place) and a content store keyed
+  by the SHA-256 of each message's exact bytes. Every request is then rebuilt
+  and compared with the original. The program also reports the time taken and
+  how agents re-encode echoed replies.
 
 ```
 go run ./research/storage/corpus -out /tmp/corpus -users 20 -tasks 10 -text "$(go env GOROOT)/src"
@@ -46,87 +55,90 @@ go run ./research/storage/anatomy -log /tmp/corpus/corpus.jsonl
 go run ./research/storage/rebuild -log /tmp/corpus/corpus.jsonl
 ```
 
-## What we found
+## Results
 
-### 1. Almost everything is repeated
+### Composition of the log
 
-Simulated company: 20 people, 10 tasks each, 2,372 model calls, 238 MB, about
-100 KB per call. Text came from the Go standard library source code (157 MB
-of varied real files), so new content really is new.
+Simulated organisation: 20 users, 10 tasks each, 2,372 model calls, 238 MB,
+about 100 KB per call. Text was drawn from the Go standard library source
+(157 MB of varied files), so content new to a session is genuinely new.
 
-| What the bytes are | Share of the log |
+| Category | Share |
 |---|---|
-| Conversation history sent again | 54% |
-| The agent's list of tools, sent with every call | 31% |
-| Extra characters from storing one JSON text inside another (every quote gets a backslash) | 8% |
-| New tool results | 4% |
-| blackbox's own details and signatures | 2% |
-| Everything else (instructions, replies, user messages) | 1% |
+| History resent from earlier in the session | 53.8% |
+| Tool definitions, resent with every call | 30.7% |
+| Escaping of request and response bodies stored as JSON strings | 8.4% |
+| Tool results new to the session | 4.2% |
+| Gateway metadata and signatures | 1.7% |
+| System prompts, replies, user messages, responses | 1.2% |
 
-A conversation's requests grow from about 36 KB at the first step to about
-215 KB at the fortieth, while each step adds only about 5 KB of new content.
-So storage grows much faster than the work being done: doubling the length
-of conversations roughly quadruples the log.
+Request size grows from 36 KB at the first call of a session to 215 KB at
+the fortieth, while each call adds about 5 KB of new content.
 
-### 2. Ordinary compression does not fix it
+The escaping overhead is a separate finding: a JSON request stored inside a
+JSON string has every quotation mark escaped. Storing bodies as embedded JSON
+would remove this 8% even without deduplication.
 
-| How it is stored | Size | Smaller by |
+### Storage schemes
+
+| Scheme | Size | Reduction |
 |---|---|---|
-| As today | 238.0 MB | 1x |
-| Zip each entry | 67.8 MB | 3.5x |
-| Zip the whole log | 65.3 MB | 3.6x |
-| Each message stored once | 16.8 MB | 14x |
-| Each message stored once, then zipped | 4.6 MB | 52x |
+| Current format | 238.0 MB | 1x |
+| gzip per entry | 67.8 MB | 3.5x |
+| gzip of the whole log | 65.3 MB | 3.6x |
+| Each distinct message stored once | 16.8 MB | 14x |
+| Each distinct message stored once, then gzip | 4.6 MB | 52x |
 
-Zip only looks back a short distance (32 KB) for repeats, and the repeated
-history is further back than that, so zip cannot see it. Storing each
-message once removes the repeats directly. The results stayed the same from
-5 to 40 people, so the saving comes from inside conversations and does not
-depend on company size.
+General-purpose compression recovers little because DEFLATE, the algorithm
+behind gzip, finds repeats only within a 32 KB window, and resent history
+lies further back than that. Reductions were stable from 5 to 40 users, which
+indicates the saving comes mainly from redundancy within sessions rather than
+across users.
 
-### 3. Nothing is lost
+### Byte-exact reconstruction
 
-blackbox has to be able to show exactly what an agent sent, byte for byte,
-because the signatures cover the exact bytes. Every request was rebuilt from
-the stored pieces and compared with the original.
+Signatures cover the exact request bytes, so any storage scheme must
+reproduce them exactly.
 
-| Traffic | Rebuilt exactly | Skeleton size |
+| Traffic | Reconstructed exactly | Skeleton overhead |
 |---|---|---|
-| Simulated company | 2,372 of 2,372 | 0.36% of the original (about 320 bytes per request) |
-| A plain Python agent, through a real blackbox gateway | 440 of 440 | 0.58% (about 130 bytes per request) |
-| The most widely used Python client library, three common coding styles | 741 of 741 | about 0.55% (about 125 bytes per request) |
+| Simulated organisation | 2,372 of 2,372 | 0.36% (320 bytes per request) |
+| Python agent using the standard library, through a blackbox gateway | 440 of 440 | 0.58% (133 bytes per request) |
+| Python agent using the most widely used client library, three echo styles | 741 of 741 | 0.55% (125 bytes per request) |
 
-The Python runs used replies recorded earlier from a real model server,
-played back byte for byte, so the server's format is real.
+The Python agents ran against replies recorded from a real model server and
+replayed byte for byte, so the server's encoding is authentic.
 
-### 4. Real agents rewrite the model's replies, and that is fine
+### How agents echo replies
 
-When an agent passes the model's reply back into the conversation, it almost
-never uses the exact bytes the server sent: 0 of 981 replies matched. Python
-agents read the reply and write it out again in their own format, and some
-add extra empty fields. But once an agent has written a message, it sends it
-again with the same bytes at every later step, so the history still
-deduplicates. The cost is one extra stored copy of each reply, and replies
-are only a few percent of the log.
+None of the 981 replies that agents sent back matched the bytes the server
+returned. Agents decode the reply and encode it again; some add fields with
+null values or drop fields such as `index`. Once an agent has encoded a
+message, however, it resends it with identical bytes on every later call:
+no message was re-encoded differently between calls. The cost of
+re-encoding is therefore one additional stored copy per reply, and replies
+account for a few percent of the log.
 
-blackbox's own checks were not fooled by any of these styles: across 1,181
-calls they raised no false alarms about rewritten history, because they
-compare what messages say, not how they are formatted.
+Across these 1,181 calls, blackbox's session checks raised no false history
+or tool-result anomalies, since they compare messages by content rather than
+by encoding.
 
-### 5. It is cheap to do
+### Cost
 
-Splitting a request into its stored pieces takes about 0.4 milliseconds;
-rebuilding one takes about 0.01 milliseconds. For a company making 90,000
-model calls a day, that is about 35 seconds of computer time per day.
+Splitting and hashing a request took 388 microseconds on average (231 MB/s);
+reconstruction from memory took 9 microseconds. At 90,000 calls a day this
+is about 35 seconds of CPU time per day.
 
-## What is still open
+## Limitations and next steps
 
-- **Real workloads.** The company traffic is simulated: how long
-  conversations run and how big tools and files are were our assumptions.
-  Real logs from real teams would confirm or correct the numbers.
-- **More agent tools.** We tested plain Python and the most common client
-  library. Larger agent frameworks might reformat history between steps,
-  which would reduce the saving.
-- **Where the data lives.** The log should not stay on the gateway forever.
-  The next design step is moving older data to storage the organisation owns,
-  and measuring how fast one call can be opened from there.
+- **Simulated workload.** Session lengths, tool definition sizes, and tool
+  result sizes are assumptions. Measurements from production agent traffic
+  are needed to confirm the reductions.
+- **Agent frameworks.** Only standard-library Python and the most common
+  client library were tested. Frameworks that rebuild the conversation from
+  their own objects on each call could re-encode history between calls and
+  reduce the saving.
+- **Storage architecture.** A content store needs a home other than the
+  gateway: sealed segments moved to storage the organisation controls, with
+  the signature chain committing to message hashes. Retrieval latency for a
+  single call from that storage has not been measured.
