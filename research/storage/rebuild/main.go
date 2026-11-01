@@ -27,6 +27,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/bkodzo/blackbox/internal/format"
 	"github.com/bkodzo/blackbox/internal/ledger"
@@ -61,6 +62,7 @@ func main() {
 	var raw, skeleton, refs, storeBytes int64
 	var reserialized, reserializedBytes int64
 	var echoExact, echoCanon, echoDiffer int64
+	var splitTime, rebuildTime time.Duration
 
 	br := bufio.NewReaderSize(f, 1<<20)
 	for {
@@ -98,7 +100,9 @@ func main() {
 		}
 		sid := rec.Session.ID + "|" + rec.Session.Conversation
 		req := []byte(rec.Request.Body.Text)
+		t0 := time.Now()
 		pieces, msgs, err := split(req)
+		splitTime += time.Since(t0)
 		if err != nil {
 			skipped++ // not a JSON object with messages; stored as is
 			continue
@@ -150,7 +154,10 @@ func main() {
 		for h := range msgs {
 			seen[h] = true
 		}
-		if bytes.Equal(rebuild(pieces, store), req) {
+		t0 = time.Now()
+		rebuilt := rebuild(pieces, store)
+		rebuildTime += time.Since(t0)
+		if bytes.Equal(rebuilt, req) {
 			exact++
 		}
 
@@ -173,6 +180,9 @@ func main() {
 	fmt.Printf("Skeletons:               %s literal + %s of references = %s, %.2f%% of raw, %s per request\n",
 		mb(skeleton), mb(refs*refSize), mb(resid), pct(resid, raw), byteStr(resid/max(requests, 1)))
 	fmt.Printf("Together:                %s, %.1fx smaller than raw\n\n", mb(storeBytes+resid), float64(raw)/float64(max(storeBytes+resid, 1)))
+	fmt.Printf("Work per request: splitting and hashing %s (%.0f MB/s), rebuilding %s (%.0f MB/s)\n\n",
+		(splitTime / time.Duration(max(requests, 1))).Round(time.Microsecond), float64(raw)/1e6/splitTime.Seconds(),
+		(rebuildTime / time.Duration(max(requests, 1))).Round(time.Microsecond), float64(raw)/1e6/rebuildTime.Seconds())
 	fmt.Printf("Resent with different formatting (same content, new bytes): %d messages, %s\n", reserialized, mb(reserializedBytes))
 	total := echoExact + echoCanon + echoDiffer
 	fmt.Printf("Replies echoed back: %d; same bytes as returned %d (%.0f%%), same content in other bytes %d (%.0f%%), different %d (%.0f%%)\n",
