@@ -123,6 +123,46 @@ Across these 1,181 calls, blackbox's session checks raised no false history
 or tool-result anomalies, since they compare messages by content rather than
 by encoding.
 
+### Effect of session length
+
+The reduction depends on how many calls a session makes, because resent
+history grows with every call. The simulated organisation was regenerated
+with different average session lengths (10 users, 10 tasks each):
+
+| Mean calls per session | gzip | Stored once | Stored once, then gzip |
+|---|---|---|---|
+| 2 | 3.9x | 6.9x | 24.5x |
+| 4 | 3.8x | 8.0x | 30.0x |
+| 8 | 3.9x | 12.3x | 46.7x |
+| 16 | 3.6x | 15.9x | 55.6x |
+| 32 | 3.7x | 27.1x | 86.6x |
+
+gzip stays near 4x regardless of length, while deduplication improves as
+sessions grow. Even two-call sessions benefit in this workload, because tool
+definitions and system prompts repeat across every session of an agent.
+
+### A real agent against a local model
+
+A working agent built on the client library answered twelve questions about
+this repository, calling a local 3-billion-parameter model through a
+blackbox gateway and executing its tool calls (list a directory, read a
+file, search the code). The model rarely made more than two calls before
+answering, so sessions were short: 22 calls averaging 7 KB.
+
+| Scheme | Reduction |
+|---|---|
+| gzip of the whole log | 5.1x |
+| Each distinct message stored once | 1.3x |
+| Each distinct message stored once, then gzip | 5.4x |
+
+All 22 requests were reconstructed exactly and no history was re-encoded
+between calls. With requests this small and sessions this short, gateway
+metadata is a quarter of the log and there is little history to remove, so
+deduplication adds almost nothing over gzip. The workload that motivates
+this study, agents running tens to hundreds of calls with large contexts,
+could not be reproduced with the models available locally; a larger
+tool-capable model is needed to measure it directly.
+
 ### Cost
 
 Splitting and hashing a request took 388 microseconds on average (231 MB/s);
@@ -132,8 +172,10 @@ is about 35 seconds of CPU time per day.
 ## Limitations and next steps
 
 - **Simulated workload.** Session lengths, tool definition sizes, and tool
-  result sizes are assumptions. Measurements from production agent traffic
-  are needed to confirm the reductions.
+  result sizes are assumptions. The only real agent traffic measured so far
+  came from a small local model with short sessions, where the method gives
+  little over gzip. Measurements from long-running production agents are
+  needed to confirm the larger reductions.
 - **Agent frameworks.** Only standard-library Python and the most common
   client library were tested. Frameworks that rebuild the conversation from
   their own objects on each call could re-encode history between calls and
